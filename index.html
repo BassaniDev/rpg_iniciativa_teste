@@ -1,5 +1,4 @@
 <!DOCTYPE html>
-<!DOCTYPE html>
 <html lang="pt-BR" class="dark">
 <head>
   <meta charset="UTF-8" />
@@ -381,9 +380,8 @@
     }
     [data-tooltip]:hover::after { opacity: 1; }
 
-    /* Área de tela principal */
+    /* Área de tela principal — display controlado via JS (flex/hidden) */
     #screen-game {
-      display: flex;
       flex-direction: column;
       height: 100vh;
       overflow: hidden;
@@ -987,6 +985,7 @@
 
   /** Determina classe CSS de cor para o valor do dado */
   function rollClass(val) {
+    if (val === null || val === undefined) return 'normal';
     if (val === 20) return 'nat20';
     if (val === 1)  return 'nat1';
     return 'normal';
@@ -1013,8 +1012,7 @@
     const rClass    = rollClass(player.roll);
     const isMine    = isMe;
 
-    // Porcentagem da barra de ranking
-    const maxRoll  = Math.max(...Object.values(state.players).map(p => p.roll ?? 0), 1);
+    // Porcentagem da barra de ranking (baseada no máximo possível D20 = 20)
     const barWidth = hasRolled ? Math.round((player.roll / 20) * 100) : 0;
 
     // Badge de ranking
@@ -1095,34 +1093,51 @@
 
   /** Renderiza o grid completo de jogadores */
   function renderPlayersGrid() {
-    const grid    = document.getElementById('players-grid');
-    const empty   = document.getElementById('empty-state');
-    const sorted  = getSortedPlayers();
-    const online  = Object.values(state.players).filter(p => p.online).length;
+    const grid   = document.getElementById('players-grid');
+    const sorted = getSortedPlayers();
+    const online = Object.values(state.players).filter(p => p.online).length;
 
     // Atualiza contador do header
-    document.getElementById('header-players-count').textContent = online;
-    document.getElementById('roll-status-text').textContent =
+    const headerCount = document.getElementById('header-players-count');
+    const rollStatus  = document.getElementById('roll-status-text');
+    if (headerCount) headerCount.textContent = online;
+    if (rollStatus)  rollStatus.textContent  =
       sorted.filter(p => p.roll !== null).length + '/' + sorted.length + ' rolaram';
 
     if (sorted.length === 0) {
-      if (!empty.style.display || empty.style.display === 'none') {
-        empty.style.display = 'flex';
-        grid.innerHTML = '';
-        grid.appendChild(empty);
+      // Garante que o empty-state esteja no grid e visível
+      let empty = document.getElementById('empty-state');
+      if (!empty) {
+        // Recria o empty-state caso tenha sumido do DOM
+        empty = document.createElement('div');
+        empty.id = 'empty-state';
+        empty.className = 'col-span-full flex flex-col items-center justify-center py-16 text-center';
+        empty.innerHTML = `
+          <svg width="48" height="48" viewBox="0 0 72 72" class="mb-4 opacity-20">
+            <polygon points="36,6 66,22 66,50 36,66 6,50 6,22" fill="#7C3AED" stroke="#A855F7" stroke-width="2"/>
+            <text x="36" y="40" text-anchor="middle" font-family="Cinzel,serif" font-size="18" font-weight="900" fill="white">20</text>
+          </svg>
+          <p class="text-slate-500 text-sm">Aguardando jogadores...</p>
+          <p class="text-slate-600 text-xs mt-1">Compartilhe o ID da sala</p>`;
       }
+      grid.innerHTML = '';
+      empty.style.display = 'flex';
+      grid.appendChild(empty);
       return;
     }
 
-    // Esconde estado vazio
-    empty.style.display = 'none';
+    // Remove o empty-state do grid antes de inserir os cards
+    const existingEmpty = document.getElementById('empty-state');
+    if (existingEmpty && existingEmpty.parentNode === grid) {
+      existingEmpty.remove();
+    }
 
-    // Reconstrói apenas os cards (evita flash total na tela)
+    // Reconstrói os cards
     const newHtml = sorted.map((p, i) => buildPlayerCard(p, i, sorted.length)).join(
       `<div class="initiative-divider col-span-full hidden"></div>`
     );
 
-    // Só re-renderiza se algo mudou
+    // Só re-renderiza se algo mudou (evita flash desnecessário)
     if (grid.dataset.lastHash !== newHtml.length.toString()) {
       grid.dataset.lastHash = newHtml.length.toString();
       grid.innerHTML = newHtml;
@@ -1385,11 +1400,11 @@
     }
 
     // Cria cliente Supabase
-    supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
     // ── Canal principal de eventos (Broadcast) ──
     // Nome do canal inclui o ID da sala para isolamento
-    channel = supabase.channel(`initiative:${room}`, {
+    channel = supabaseClient.channel(`initiative:${room}`, {
       config: {
         broadcast: { self: false }, // não recebe o próprio broadcast (já aplicado localmente)
         presence:  { key: state.userId },
@@ -1686,4 +1701,3 @@
 
 </body>
 </html>
-```
