@@ -1,0 +1,1688 @@
+<!DOCTYPE html>
+<!DOCTYPE html>
+<html lang="pt-BR" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>D20 Initiative Tracker · RPG Online</title>
+  <meta name="description" content="Sistema de iniciativa D20 multiplayer em tempo real para RPG de mesa" />
+
+  <!-- ════════════════════════════════════════════
+       DEPENDÊNCIAS VIA CDN
+  ════════════════════════════════════════════ -->
+  <!-- Tailwind CSS v3 -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Google Fonts: Cinzel (display épico) + Inter (UI) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700;900&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+
+  <!-- Supabase JS v2 (Client para Realtime + Database) -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+  <!-- ════════════════════════════════════════════
+       TAILWIND CONFIG — TEMA CUSTOMIZADO
+  ════════════════════════════════════════════ -->
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            display: ['Cinzel', 'serif'],
+            body: ['Inter', 'sans-serif'],
+          },
+          colors: {
+            // Paleta: Abissal escura com neon violeta/ciano
+            void:   { DEFAULT: '#080B12', 50: '#0D1120', 100: '#111827' },
+            arcane: { DEFAULT: '#7C3AED', light: '#A855F7', glow: '#C084FC' },
+            mystic: { DEFAULT: '#06B6D4', light: '#22D3EE', glow: '#67E8F9' },
+            ember:  { DEFAULT: '#F59E0B', light: '#FCD34D' },
+            danger: { DEFAULT: '#EF4444', light: '#FCA5A5' },
+            rune:   { DEFAULT: '#1E2942', border: '#2D3F6B' },
+          },
+          boxShadow: {
+            arcane: '0 0 20px rgba(124,58,237,0.5), 0 0 60px rgba(124,58,237,0.2)',
+            mystic: '0 0 20px rgba(6,182,212,0.5), 0 0 60px rgba(6,182,212,0.2)',
+            ember:  '0 0 20px rgba(245,158,11,0.5), 0 0 60px rgba(245,158,11,0.2)',
+            nat20:  '0 0 30px rgba(245,158,11,0.8), 0 0 80px rgba(245,158,11,0.4)',
+          },
+          animation: {
+            'roll-shake': 'rollShake 0.6s ease-in-out',
+            'pulse-glow': 'pulseGlow 1.5s ease-in-out infinite',
+            'nat20-burst': 'nat20Burst 0.8s ease-out',
+            'slide-in-right': 'slideInRight 0.3s ease-out',
+            'fade-in': 'fadeIn 0.4s ease-out',
+            'bounce-in': 'bounceIn 0.5s cubic-bezier(0.36,0.07,0.19,0.97)',
+            'spin-slow': 'spin 3s linear infinite',
+          },
+          keyframes: {
+            rollShake: {
+              '0%,100%': { transform: 'translateX(0) rotate(0deg)' },
+              '15%':      { transform: 'translateX(-8px) rotate(-5deg)' },
+              '30%':      { transform: 'translateX(8px) rotate(5deg)' },
+              '45%':      { transform: 'translateX(-6px) rotate(-3deg)' },
+              '60%':      { transform: 'translateX(6px) rotate(3deg)' },
+              '75%':      { transform: 'translateX(-3px) rotate(-1deg)' },
+              '90%':      { transform: 'translateX(3px) rotate(1deg)' },
+            },
+            pulseGlow: {
+              '0%,100%': { boxShadow: '0 0 10px rgba(124,58,237,0.3)' },
+              '50%':     { boxShadow: '0 0 30px rgba(124,58,237,0.8), 0 0 60px rgba(124,58,237,0.4)' },
+            },
+            nat20Burst: {
+              '0%':   { transform: 'scale(1)', boxShadow: '0 0 0 rgba(245,158,11,0)' },
+              '50%':  { transform: 'scale(1.15)', boxShadow: '0 0 40px rgba(245,158,11,0.9), 0 0 100px rgba(245,158,11,0.5)' },
+              '100%': { transform: 'scale(1)', boxShadow: '0 0 20px rgba(245,158,11,0.5)' },
+            },
+            slideInRight: {
+              '0%':   { transform: 'translateX(100%)', opacity: '0' },
+              '100%': { transform: 'translateX(0)', opacity: '1' },
+            },
+            fadeIn: {
+              '0%':   { opacity: '0', transform: 'translateY(8px)' },
+              '100%': { opacity: '1', transform: 'translateY(0)' },
+            },
+            bounceIn: {
+              '0%':   { transform: 'scale(0.3)', opacity: '0' },
+              '50%':  { transform: 'scale(1.05)' },
+              '70%':  { transform: 'scale(0.9)' },
+              '100%': { transform: 'scale(1)', opacity: '1' },
+            },
+          },
+        },
+      },
+    };
+  </script>
+
+  <!-- ════════════════════════════════════════════
+       CSS GLOBAL — ESTILOS CUSTOMIZADOS
+  ════════════════════════════════════════════ -->
+  <style>
+    /* Reset base */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; overflow: hidden; }
+    body {
+      font-family: 'Inter', sans-serif;
+      background-color: #080B12;
+      color: #E2E8F0;
+    }
+
+    /* Scrollbar estilizado */
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: #0D1120; }
+    ::-webkit-scrollbar-thumb { background: #7C3AED; border-radius: 4px; }
+
+    /* ──── TELA DE LOGIN ──── */
+    #screen-login {
+      background:
+        radial-gradient(ellipse at 30% 20%, rgba(124,58,237,0.15) 0%, transparent 60%),
+        radial-gradient(ellipse at 70% 80%, rgba(6,182,212,0.10) 0%, transparent 60%),
+        #080B12;
+    }
+
+    /* Grid de runas decorativas no fundo */
+    .rune-grid {
+      position: fixed; inset: 0; pointer-events: none; z-index: 0;
+      background-image:
+        linear-gradient(rgba(45,63,107,0.15) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(45,63,107,0.15) 1px, transparent 1px);
+      background-size: 40px 40px;
+    }
+
+    /* ──── DADO D20 (SVG ANIMADO) ──── */
+    .dice-svg { transition: filter 0.3s ease; }
+    .dice-svg:hover { filter: drop-shadow(0 0 12px rgba(124,58,237,0.8)); }
+
+    /* ──── CARDS DE JOGADOR ──── */
+    .player-card {
+      transition: transform 0.2s ease, box-shadow 0.3s ease;
+      position: relative;
+      overflow: hidden;
+    }
+    .player-card::before {
+      content: '';
+      position: absolute; inset: 0;
+      background: linear-gradient(135deg, rgba(124,58,237,0.05) 0%, transparent 60%);
+      pointer-events: none;
+    }
+    .player-card:hover { transform: translateY(-2px); }
+    .player-card.rolling { animation: rollShake 0.6s ease-in-out; }
+    .player-card.nat20-effect { animation: nat20Burst 0.8s ease-out; }
+    .player-card.nat1-effect { animation: rollShake 0.6s ease-in-out; }
+
+    /* Linha de posição no ranking */
+    .rank-bar {
+      height: 3px;
+      background: linear-gradient(90deg, #7C3AED, #06B6D4);
+      border-radius: 2px;
+      transition: width 0.8s cubic-bezier(0.4,0,0.2,1);
+    }
+
+    /* ──── FEED DE COMBATE ──── */
+    #combat-log {
+      height: 100%;
+      overflow-y: auto;
+      scroll-behavior: smooth;
+    }
+    .log-entry { animation: slideInRight 0.3s ease-out; }
+
+    /* ──── INPUT ESTILIZADO ──── */
+    .rune-input {
+      background: rgba(30,41,66,0.6);
+      border: 1px solid rgba(45,63,107,0.8);
+      border-radius: 8px;
+      color: #E2E8F0;
+      padding: 12px 16px;
+      font-size: 15px;
+      width: 100%;
+      transition: border-color 0.2s, box-shadow 0.2s;
+      outline: none;
+    }
+    .rune-input:focus {
+      border-color: #7C3AED;
+      box-shadow: 0 0 0 2px rgba(124,58,237,0.25);
+    }
+    .rune-input::placeholder { color: rgba(148,163,184,0.5); }
+
+    /* ──── BOTÕES ──── */
+    .btn-primary {
+      background: linear-gradient(135deg, #7C3AED 0%, #5B21B6 100%);
+      border: 1px solid rgba(124,58,237,0.4);
+      color: #fff;
+      font-weight: 600;
+      padding: 12px 24px;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      position: relative;
+      overflow: hidden;
+    }
+    .btn-primary::after {
+      content: '';
+      position: absolute; inset: 0;
+      background: linear-gradient(135deg, rgba(255,255,255,0.1) 0%, transparent 50%);
+    }
+    .btn-primary:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 0 20px rgba(124,58,237,0.5), 0 4px 16px rgba(0,0,0,0.3);
+    }
+    .btn-primary:active { transform: translateY(0); }
+    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+    .btn-roll {
+      background: linear-gradient(135deg, #F59E0B 0%, #D97706 100%);
+      border: 1px solid rgba(245,158,11,0.4);
+      color: #1a0a00;
+      font-weight: 700;
+      font-family: 'Cinzel', serif;
+      font-size: 16px;
+      padding: 16px 32px;
+      border-radius: 12px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      letter-spacing: 0.05em;
+    }
+    .btn-roll:hover {
+      transform: translateY(-2px) scale(1.02);
+      box-shadow: 0 0 30px rgba(245,158,11,0.6), 0 8px 24px rgba(0,0,0,0.4);
+    }
+    .btn-roll:active { transform: scale(0.98); }
+    .btn-roll:disabled {
+      opacity: 0.6; cursor: not-allowed;
+      transform: none; box-shadow: none;
+    }
+
+    .btn-danger {
+      background: rgba(239,68,68,0.15);
+      border: 1px solid rgba(239,68,68,0.3);
+      color: #FCA5A5;
+      font-size: 13px;
+      padding: 6px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .btn-danger:hover { background: rgba(239,68,68,0.25); }
+
+    .btn-ghost {
+      background: rgba(30,41,66,0.4);
+      border: 1px solid rgba(45,63,107,0.6);
+      color: #94A3B8;
+      font-size: 13px;
+      padding: 6px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .btn-ghost:hover { border-color: #7C3AED; color: #C084FC; }
+
+    /* ──── BADGE DE VALOR DO DADO ──── */
+    .dice-value {
+      font-family: 'Cinzel', serif;
+      font-size: 2.5rem;
+      font-weight: 900;
+      line-height: 1;
+      transition: all 0.3s ease;
+    }
+    .dice-value.nat20 { color: #FCD34D; text-shadow: 0 0 20px rgba(245,158,11,0.8); }
+    .dice-value.nat1  { color: #FCA5A5; text-shadow: 0 0 10px rgba(239,68,68,0.6); }
+    .dice-value.normal { color: #E2E8F0; }
+
+    /* ──── INDICADOR DE RANK ──── */
+    .rank-badge {
+      width: 28px; height: 28px;
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 11px; font-weight: 700;
+      font-family: 'Cinzel', serif;
+    }
+    .rank-1 { background: linear-gradient(135deg, #F59E0B, #92400E); color: #fff; box-shadow: 0 0 10px rgba(245,158,11,0.5); }
+    .rank-2 { background: linear-gradient(135deg, #94A3B8, #475569); color: #fff; }
+    .rank-3 { background: linear-gradient(135deg, #CD7C2F, #7C3714); color: #fff; }
+    .rank-n { background: rgba(30,41,66,0.8); color: #64748B; border: 1px solid #2D3F6B; }
+
+    /* ──── TOAST NOTIFICATIONS ──── */
+    #toast-container {
+      position: fixed; bottom: 80px; left: 50%;
+      transform: translateX(-50%);
+      z-index: 9999;
+      display: flex; flex-direction: column-reverse; gap: 8px;
+      pointer-events: none;
+      width: min(90vw, 320px);
+    }
+    .toast {
+      background: rgba(30,41,66,0.95);
+      border: 1px solid rgba(45,63,107,0.8);
+      border-radius: 10px;
+      padding: 12px 16px;
+      font-size: 14px;
+      backdrop-filter: blur(12px);
+      animation: bounceIn 0.5s cubic-bezier(0.36,0.07,0.19,0.97);
+      pointer-events: auto;
+    }
+    .toast.success { border-left: 3px solid #22C55E; }
+    .toast.error   { border-left: 3px solid #EF4444; }
+    .toast.info    { border-left: 3px solid #7C3AED; }
+    .toast.nat20   { border-left: 3px solid #F59E0B; box-shadow: 0 0 20px rgba(245,158,11,0.3); }
+
+    /* ──── MODAL ──── */
+    .modal-overlay {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.7);
+      backdrop-filter: blur(4px);
+      z-index: 100;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .modal-box {
+      background: #0D1120;
+      border: 1px solid #2D3F6B;
+      border-radius: 16px;
+      padding: 32px;
+      width: min(90vw, 440px);
+      animation: fadeIn 0.3s ease-out;
+    }
+
+    /* ──── STATUS ONLINE/OFFLINE ──── */
+    .status-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+    .status-dot.online  { background: #22C55E; box-shadow: 0 0 6px #22C55E; animation: pulse 2s infinite; }
+    .status-dot.offline { background: #475569; }
+    @keyframes pulse {
+      0%,100% { box-shadow: 0 0 0 0 rgba(34,197,94,0.4); }
+      50% { box-shadow: 0 0 0 6px rgba(34,197,94,0); }
+    }
+
+    /* ──── SEPARADOR DE INICIATIVA ──── */
+    .initiative-divider {
+      height: 1px;
+      background: linear-gradient(90deg, transparent, #2D3F6B, #7C3AED, #2D3F6B, transparent);
+      margin: 8px 0;
+    }
+
+    /* Rolagem suave no grid */
+    #players-grid { overflow-y: auto; }
+
+    /* ──── RESPONSIVO MOBILE ──── */
+    @media (max-width: 640px) {
+      .dice-value { font-size: 2rem; }
+      .btn-roll { width: 100%; justify-content: center; }
+    }
+
+    /* ──── EFEITO DE PARTÍCULAS NO NAT 20 ──── */
+    .particle {
+      position: fixed;
+      pointer-events: none;
+      z-index: 9998;
+      border-radius: 50%;
+      animation: particleFly 1s ease-out forwards;
+    }
+    @keyframes particleFly {
+      0%   { opacity: 1; transform: translate(0,0) scale(1); }
+      100% { opacity: 0; transform: translate(var(--tx), var(--ty)) scale(0); }
+    }
+
+    /* Tooltip */
+    [data-tooltip] { position: relative; cursor: help; }
+    [data-tooltip]::after {
+      content: attr(data-tooltip);
+      position: absolute; bottom: calc(100% + 8px); left: 50%;
+      transform: translateX(-50%);
+      background: #1E2942; border: 1px solid #2D3F6B;
+      color: #94A3B8; font-size: 11px; padding: 4px 8px;
+      border-radius: 6px; white-space: nowrap;
+      opacity: 0; pointer-events: none; transition: opacity 0.2s;
+      z-index: 50;
+    }
+    [data-tooltip]:hover::after { opacity: 1; }
+
+    /* Área de tela principal */
+    #screen-game {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+  </style>
+</head>
+<body class="font-body">
+
+  <!-- ════════════════════════════════════════════
+       GRADE DE RUNAS (FUNDO DECORATIVO)
+  ════════════════════════════════════════════ -->
+  <div class="rune-grid"></div>
+
+  <!-- ════════════════════════════════════════════
+       CONTAINER DE TOASTS (NOTIFICAÇÕES)
+  ════════════════════════════════════════════ -->
+  <div id="toast-container"></div>
+
+  <!-- ════════════════════════════════════════════
+       TELA 1 — LOGIN / ENTRADA NA SALA
+  ════════════════════════════════════════════ -->
+  <div id="screen-login" class="fixed inset-0 z-50 flex items-center justify-center p-4">
+    <div class="relative z-10 w-full max-w-md">
+
+      <!-- Logo + Título -->
+      <div class="text-center mb-10">
+        <div class="inline-flex items-center justify-center mb-4">
+          <!-- Ícone D20 decorativo -->
+          <svg width="72" height="72" viewBox="0 0 72 72" class="dice-svg">
+            <defs>
+              <linearGradient id="diceGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" style="stop-color:#7C3AED"/>
+                <stop offset="100%" style="stop-color:#5B21B6"/>
+              </linearGradient>
+              <filter id="glow">
+                <feGaussianBlur stdDeviation="3" result="blur"/>
+                <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+              </filter>
+            </defs>
+            <!-- Icosaedro simplificado (vista frontal D20) -->
+            <polygon points="36,6 66,22 66,50 36,66 6,50 6,22" fill="url(#diceGrad)" stroke="#A855F7" stroke-width="1.5" filter="url(#glow)"/>
+            <polygon points="36,6 66,22 36,30" fill="rgba(255,255,255,0.08)"/>
+            <polygon points="6,22 36,30 36,6" fill="rgba(0,0,0,0.15)"/>
+            <polygon points="6,22 36,30 6,50" fill="rgba(0,0,0,0.1)"/>
+            <polygon points="66,22 66,50 36,30" fill="rgba(255,255,255,0.05)"/>
+            <polygon points="36,30 66,50 36,66" fill="rgba(0,0,0,0.2)"/>
+            <polygon points="36,30 6,50 36,66" fill="rgba(255,255,255,0.04)"/>
+            <text x="36" y="37" text-anchor="middle" font-family="Cinzel,serif" font-size="14" font-weight="900" fill="rgba(255,255,255,0.9)" dy="0.3em">20</text>
+          </svg>
+        </div>
+        <h1 class="font-display text-4xl font-black tracking-widest text-white mb-2" style="letter-spacing:0.12em;">
+          INITIATIVE
+        </h1>
+        <p class="text-sm text-slate-400 tracking-[0.3em] uppercase">Sistema D20 · Multiplayer</p>
+      </div>
+
+      <!-- Card do formulário -->
+      <div class="bg-[#0D1120]/80 border border-[#2D3F6B] rounded-2xl p-8 backdrop-blur-sm"
+           style="box-shadow: 0 0 40px rgba(124,58,237,0.1);">
+
+        <h2 class="font-display text-lg text-arcane-light mb-6 text-center">Entrar na Sessão</h2>
+
+        <!-- Nickname -->
+        <div class="mb-5">
+          <label class="block text-xs font-semibold tracking-widest text-slate-400 uppercase mb-2">
+            Seu Personagem
+          </label>
+          <input
+            id="input-nickname"
+            type="text"
+            class="rune-input"
+            placeholder="Ex: Thiago, Elfo Arqueiro..."
+            maxlength="24"
+            autocomplete="off"
+          />
+        </div>
+
+        <!-- ID da Sala -->
+        <div class="mb-5">
+          <label class="block text-xs font-semibold tracking-widest text-slate-400 uppercase mb-2">
+            Sala / Campanha
+          </label>
+          <input
+            id="input-room"
+            type="text"
+            class="rune-input"
+            placeholder="Ex: dungeon-01, mesa-dos-amigos..."
+            maxlength="32"
+            autocomplete="off"
+          />
+          <p class="text-xs text-slate-500 mt-2">
+            Use o mesmo nome para todos da mesa entrarem juntos
+          </p>
+        </div>
+
+        <!-- Opção Mestre -->
+        <div class="mb-6">
+          <label class="flex items-center gap-3 cursor-pointer group">
+            <div class="relative">
+              <input id="checkbox-gm" type="checkbox" class="sr-only peer"/>
+              <div class="w-11 h-6 bg-[#1E2942] border border-[#2D3F6B] rounded-full peer
+                          peer-checked:bg-arcane peer-checked:border-arcane
+                          transition-all after:content-[''] after:absolute after:top-0.5 after:left-0.5
+                          after:bg-white after:rounded-full after:w-5 after:h-5
+                          after:transition-transform peer-checked:after:translate-x-5"></div>
+            </div>
+            <div>
+              <span class="text-sm font-medium text-slate-300 group-hover:text-white transition-colors">
+                Entrar como Mestre (GM)
+              </span>
+              <p class="text-xs text-slate-500">Pode limpar rodadas e ver informações extras</p>
+            </div>
+          </label>
+        </div>
+
+        <!-- Botão Entrar -->
+        <button id="btn-enter" class="btn-primary w-full text-center flex items-center justify-center gap-2">
+          <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4M10 17l5-5-5-5M15 12H3"/>
+          </svg>
+          Entrar na Sala
+        </button>
+
+        <!-- Status de conexão Supabase -->
+        <div id="supabase-status" class="mt-4 text-center">
+          <span class="text-xs text-slate-500">Verificando configuração...</span>
+        </div>
+      </div>
+
+      <!-- Aviso de configuração -->
+      <p class="text-center text-xs text-slate-600 mt-6">
+        Hospedado em GitHub Pages · Powered by Supabase Realtime
+      </p>
+    </div>
+  </div>
+
+  <!-- ════════════════════════════════════════════
+       TELA 2 — JOGO PRINCIPAL
+  ════════════════════════════════════════════ -->
+  <div id="screen-game" class="hidden">
+
+    <!-- ── HEADER ── -->
+    <header class="flex-none flex items-center justify-between px-4 py-3 border-b border-[#1E2942]"
+            style="background: rgba(8,11,18,0.95); backdrop-filter: blur(12px);">
+
+      <!-- Logo compacto + sala -->
+      <div class="flex items-center gap-3">
+        <svg width="28" height="28" viewBox="0 0 72 72" class="flex-none">
+          <polygon points="36,6 66,22 66,50 36,66 6,50 6,22" fill="#7C3AED" stroke="#A855F7" stroke-width="1.5"/>
+          <text x="36" y="37" text-anchor="middle" font-family="Cinzel,serif" font-size="16" font-weight="900" fill="white" dy="0.3em">D</text>
+        </svg>
+        <div>
+          <div class="font-display text-sm font-bold text-white tracking-wider">INITIATIVE</div>
+          <div class="flex items-center gap-1.5">
+            <span class="status-dot online"></span>
+            <span id="header-room" class="text-xs text-slate-400">#sala</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Infos centrais (contadores) -->
+      <div class="hidden sm:flex items-center gap-4 text-center">
+        <div>
+          <div id="header-players-count" class="font-display text-lg font-bold text-arcane-light">0</div>
+          <div class="text-[10px] text-slate-500 uppercase tracking-widest">Online</div>
+        </div>
+        <div class="w-px h-8 bg-[#1E2942]"></div>
+        <div>
+          <div id="header-round" class="font-display text-lg font-bold text-mystic-light">1</div>
+          <div class="text-[10px] text-slate-500 uppercase tracking-widest">Rodada</div>
+        </div>
+      </div>
+
+      <!-- Ações do header -->
+      <div class="flex items-center gap-2">
+        <!-- Botão GM: próxima rodada -->
+        <button id="btn-next-round" class="hidden btn-ghost flex items-center gap-1.5">
+          <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path d="M5 4l15 8-15 8V4zM20 4v16"/>
+          </svg>
+          <span class="hidden sm:inline text-xs">Próx. Rodada</span>
+        </button>
+
+        <!-- Botão GM: limpar iniciativas -->
+        <button id="btn-clear-rolls" class="hidden btn-danger flex items-center gap-1.5">
+          <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6M10 11v6M14 11v6M9 6V4h6v2"/>
+          </svg>
+          <span class="hidden sm:inline text-xs">Limpar</span>
+        </button>
+
+        <!-- Avatar + Sair -->
+        <div class="flex items-center gap-2 ml-2">
+          <div id="header-avatar" class="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold text-white"
+               style="background: linear-gradient(135deg, #7C3AED, #06B6D4);">?</div>
+          <button id="btn-leave" class="btn-ghost" title="Sair da sala">
+            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <!-- ── CORPO PRINCIPAL ── -->
+    <div class="flex-1 flex overflow-hidden">
+
+      <!-- ── GRID DE JOGADORES (coluna principal) ── -->
+      <main class="flex-1 flex flex-col overflow-hidden p-4 gap-4">
+
+        <!-- Barra de rodada + info -->
+        <div class="flex-none flex items-center justify-between">
+          <div class="flex items-center gap-3">
+            <h2 class="font-display text-base font-bold text-slate-300 tracking-widest uppercase">
+              Ordem de Iniciativa
+            </h2>
+            <div id="round-badge"
+                 class="px-2 py-0.5 rounded-full text-xs font-bold bg-[#1E2942] text-arcane-light border border-arcane/30">
+              Rodada 1
+            </div>
+          </div>
+          <!-- Instrução dinâmica -->
+          <span id="roll-status-text" class="text-xs text-slate-500 hidden sm:block">
+            Aguardando rolagens...
+          </span>
+        </div>
+
+        <!-- Grid dos cards dos jogadores -->
+        <div id="players-grid"
+             class="flex-1 grid gap-3 content-start overflow-y-auto pr-1"
+             style="grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));">
+          <!-- Cards injetados via JS -->
+          <div id="empty-state" class="col-span-full flex flex-col items-center justify-center py-16 text-center">
+            <svg width="48" height="48" viewBox="0 0 72 72" class="mb-4 opacity-20">
+              <polygon points="36,6 66,22 66,50 36,66 6,50 6,22" fill="#7C3AED" stroke="#A855F7" stroke-width="2"/>
+              <text x="36" y="40" text-anchor="middle" font-family="Cinzel,serif" font-size="18" font-weight="900" fill="white">20</text>
+            </svg>
+            <p class="text-slate-500 text-sm">Aguardando jogadores...</p>
+            <p class="text-slate-600 text-xs mt-1">Compartilhe o ID da sala</p>
+          </div>
+        </div>
+
+        <!-- ── BOTÃO ROLAR (fixo na base) ── -->
+        <div class="flex-none flex flex-col sm:flex-row items-center gap-3 pt-2 border-t border-[#1E2942]">
+
+          <!-- Meu card compacto (status próprio) -->
+          <div id="my-status-bar" class="flex-1 hidden items-center gap-3 bg-[#0D1120]/60 border border-[#1E2942] rounded-xl px-4 py-2">
+            <div id="my-avatar-sm" class="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold"
+                 style="background: linear-gradient(135deg, #7C3AED, #06B6D4);">?</div>
+            <div class="flex-1 min-w-0">
+              <div id="my-nickname-sm" class="text-sm font-semibold text-white truncate">—</div>
+              <div id="my-roll-sm" class="text-xs text-slate-500">Não rolou ainda</div>
+            </div>
+            <div id="my-value-sm" class="font-display text-xl font-black text-slate-600">—</div>
+          </div>
+
+          <!-- Botão central -->
+          <button id="btn-roll" class="btn-roll flex items-center gap-3">
+            <svg id="roll-dice-icon" width="24" height="24" viewBox="0 0 72 72">
+              <polygon points="36,6 66,22 66,50 36,66 6,50 6,22" fill="rgba(0,0,0,0.3)" stroke="rgba(0,0,0,0.5)" stroke-width="2"/>
+              <text x="36" y="38" text-anchor="middle" font-family="Cinzel,serif" font-size="18" font-weight="900" fill="rgba(0,0,0,0.7)" dy="0.3em">D20</text>
+            </svg>
+            <span id="btn-roll-text">ROLAR D20</span>
+          </button>
+        </div>
+      </main>
+
+      <!-- ── PAINEL LATERAL: LOG DE COMBATE ── -->
+      <aside class="hidden lg:flex flex-col w-72 border-l border-[#1E2942] bg-[#080B12]">
+
+        <!-- Header do log -->
+        <div class="flex-none flex items-center justify-between px-4 py-3 border-b border-[#1E2942]">
+          <div class="flex items-center gap-2">
+            <svg width="14" height="14" fill="none" stroke="#7C3AED" stroke-width="2" viewBox="0 0 24 24">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6"/>
+              <line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/>
+            </svg>
+            <span class="font-display text-xs font-bold text-slate-400 tracking-widest uppercase">Log de Combate</span>
+          </div>
+          <button id="btn-clear-log" class="text-[10px] text-slate-600 hover:text-slate-400 transition-colors">
+            Limpar
+          </button>
+        </div>
+
+        <!-- Entradas do log -->
+        <div id="combat-log" class="flex-1 px-3 py-3 space-y-1 text-xs overflow-y-auto">
+          <div class="text-center text-slate-600 py-8">Nenhum evento ainda</div>
+        </div>
+
+        <!-- Linha separadora e info de sala -->
+        <div class="flex-none px-4 py-3 border-t border-[#1E2942] text-center">
+          <div class="text-[10px] text-slate-600 uppercase tracking-widest">Sala Ativa</div>
+          <div id="sidebar-room" class="text-xs text-arcane-light font-mono mt-0.5">—</div>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <!-- ════════════════════════════════════════════
+       MODAL DE RESULTADO NAT 20 / NAT 1
+  ════════════════════════════════════════════ -->
+  <div id="modal-nat" class="modal-overlay hidden">
+    <div class="modal-box text-center">
+      <div id="modal-icon" class="text-6xl mb-4">🎲</div>
+      <h2 id="modal-title" class="font-display text-2xl font-black text-white mb-2"></h2>
+      <p id="modal-msg" class="text-slate-400 text-sm mb-6"></p>
+      <button onclick="closeNatModal()" class="btn-primary px-8">Continuar</button>
+    </div>
+  </div>
+
+  <!-- ════════════════════════════════════════════
+       MODAL: BOTÃO LOG MOBILE (FAB)
+  ════════════════════════════════════════════ -->
+  <button id="fab-log" class="hidden fixed bottom-24 right-4 lg:hidden z-40
+         w-12 h-12 rounded-full bg-arcane border border-arcane-light
+         flex items-center justify-center shadow-arcane transition-all hover:scale-110">
+    <svg width="20" height="20" fill="none" stroke="white" stroke-width="2" viewBox="0 0 24 24">
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+      <polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/>
+    </svg>
+  </button>
+
+  <!-- Modal Log Mobile -->
+  <div id="modal-log" class="modal-overlay hidden lg:hidden">
+    <div class="bg-[#0D1120] border border-[#2D3F6B] rounded-2xl w-full max-w-sm mx-4 overflow-hidden flex flex-col" style="max-height: 70vh;">
+      <div class="flex items-center justify-between px-4 py-3 border-b border-[#1E2942]">
+        <span class="font-display text-sm font-bold text-slate-300 uppercase tracking-wider">Log de Combate</span>
+        <button onclick="document.getElementById('modal-log').classList.add('hidden')" class="text-slate-500 hover:text-white">✕</button>
+      </div>
+      <div id="combat-log-mobile" class="flex-1 overflow-y-auto px-3 py-3 space-y-1 text-xs"></div>
+    </div>
+  </div>
+
+
+  <!-- ════════════════════════════════════════════
+       JAVASCRIPT PRINCIPAL
+  ════════════════════════════════════════════ -->
+  <script>
+  'use strict';
+
+  // ═══════════════════════════════════════════════════════════════
+  //  ⚙️  CONFIGURAÇÃO SUPABASE — SUBSTITUA AQUI
+  //  Obtenha esses valores em: https://app.supabase.com
+  //  Projeto → Settings → API → Project URL + anon key
+  // ═══════════════════════════════════════════════════════════════
+  const SUPABASE_URL      = 'https://zpogdcsdnebugklkezsu.supabase.co';
+  const SUPABASE_ANON_KEY = 'sb_publishable_kNxJOtAs0X9JNDiVPaqMvA_xCHaHIfW';
+  // ═══════════════════════════════════════════════════════════════
+
+  // ──────────────────────────────────────────────────────────────
+  //  CONSTANTES & ESTADO GLOBAL
+  // ──────────────────────────────────────────────────────────────
+  const LS_NICKNAME = 'rpg_initiative_nickname';
+  const LS_ROOM     = 'rpg_initiative_room';
+  const LS_IS_GM    = 'rpg_initiative_isgm';
+
+  let supabase        = null;   // cliente Supabase
+  let channel         = null;   // canal Realtime ativo
+  let presenceChannel = null;   // canal de Presença
+
+  /** Estado local da aplicação */
+  const state = {
+    nickname:   '',       // apelido do jogador atual
+    room:       '',       // ID da sala atual
+    isGM:       false,    // é Mestre?
+    round:      1,        // rodada atual
+    myRoll:     null,     // último valor do dado próprio
+    hasRolled:  false,    // já rolou nesta rodada?
+    players:    {},       // { userId: { nickname, roll, isGM, online, rolledAt } }
+    userId:     '',       // ID único gerado localmente
+    rolling:    false,    // animação em curso
+  };
+
+  // ──────────────────────────────────────────────────────────────
+  //  UTILITÁRIOS
+  // ──────────────────────────────────────────────────────────────
+
+  /** Gera UUID v4 simples (sem dependências) */
+  function genUUID() {
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+      const r = Math.random() * 16 | 0;
+      return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+    });
+  }
+
+  /** Hora formatada HH:MM */
+  function nowTime() {
+    return new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  }
+
+  /** Gera cor determinística a partir de uma string */
+  function colorFromString(str) {
+    const palette = [
+      ['#7C3AED','#06B6D4'], ['#06B6D4','#22D3EE'], ['#F59E0B','#EF4444'],
+      ['#22C55E','#06B6D4'], ['#EF4444','#7C3AED'], ['#8B5CF6','#EC4899'],
+      ['#14B8A6','#6366F1'], ['#F97316','#FBBF24'],
+    ];
+    let h = 0;
+    for (const c of str) h = (h * 31 + c.charCodeAt(0)) % palette.length;
+    return palette[Math.abs(h)];
+  }
+
+  /** Inicial do nickname */
+  function initials(nick) {
+    return nick.slice(0, 2).toUpperCase();
+  }
+
+  // ──────────────────────────────────────────────────────────────
+  //  WEB AUDIO API — SOM DO DADO (sem biblioteca externa)
+  // ──────────────────────────────────────────────────────────────
+  let audioCtx = null;
+
+  function getAudioContext() {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    return audioCtx;
+  }
+
+  /** Toca som de rolagem (ruído branco curto) */
+  function playSoundRoll() {
+    try {
+      const ctx = getAudioContext();
+      const buf = ctx.createBuffer(1, ctx.sampleRate * 0.3, ctx.sampleRate);
+      const data = buf.getChannelData(0);
+      for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / data.length);
+      const src    = ctx.createBufferSource();
+      const filter = ctx.createBiquadFilter();
+      const gain   = ctx.createGain();
+      filter.type = 'bandpass'; filter.frequency.value = 800;
+      gain.gain.setValueAtTime(0.3, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
+      src.buffer = buf;
+      src.connect(filter); filter.connect(gain); gain.connect(ctx.destination);
+      src.start();
+    } catch (_) { /* silencioso se bloqueado */ }
+  }
+
+  /** Som de NAT 20 (acorde épico) */
+  function playSoundNat20() {
+    try {
+      const ctx  = getAudioContext();
+      const now  = ctx.currentTime;
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.3, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 1.5);
+      gain.connect(ctx.destination);
+      [261.63, 329.63, 392.00, 523.25].forEach((freq, i) => {
+        const osc = ctx.createOscillator();
+        osc.type = 'sine'; osc.frequency.value = freq;
+        osc.connect(gain); osc.start(now + i * 0.08); osc.stop(now + 1.5);
+      });
+    } catch (_) {}
+  }
+
+  /** Som de NAT 1 (toque grave descendente) */
+  function playSoundNat1() {
+    try {
+      const ctx  = getAudioContext();
+      const now  = ctx.currentTime;
+      const osc  = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sawtooth'; osc.frequency.setValueAtTime(300, now);
+      osc.frequency.exponentialRampToValueAtTime(60, now + 0.6);
+      gain.gain.setValueAtTime(0.2, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.6);
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.start(now); osc.stop(now + 0.6);
+    } catch (_) {}
+  }
+
+  // ──────────────────────────────────────────────────────────────
+  //  PARTÍCULAS NAT 20
+  // ──────────────────────────────────────────────────────────────
+  function spawnParticles(originEl) {
+    const rect = originEl?.getBoundingClientRect() ?? { left: window.innerWidth/2, top: window.innerHeight/2 };
+    const cx = rect.left + (rect.width  || 0) / 2;
+    const cy = rect.top  + (rect.height || 0) / 2;
+    const colors = ['#F59E0B','#FCD34D','#7C3AED','#22D3EE','#fff'];
+
+    for (let i = 0; i < 20; i++) {
+      const p = document.createElement('div');
+      p.className = 'particle';
+      const size  = 4 + Math.random() * 8;
+      const angle = Math.random() * Math.PI * 2;
+      const dist  = 60 + Math.random() * 100;
+      p.style.cssText = `
+        left:${cx}px; top:${cy}px;
+        width:${size}px; height:${size}px;
+        background:${colors[i % colors.length]};
+        --tx:${Math.cos(angle)*dist}px;
+        --ty:${Math.sin(angle)*dist - 40}px;
+        animation-duration:${0.7 + Math.random()*0.5}s;
+        animation-delay:${Math.random()*0.1}s;
+      `;
+      document.body.appendChild(p);
+      setTimeout(() => p.remove(), 1500);
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────────
+  //  TOAST NOTIFICATIONS
+  // ──────────────────────────────────────────────────────────────
+  function showToast(msg, type = 'info', duration = 3500) {
+    const c = document.getElementById('toast-container');
+    const t = document.createElement('div');
+    t.className = `toast ${type}`;
+    t.textContent = msg;
+    c.appendChild(t);
+    setTimeout(() => {
+      t.style.transition = 'opacity 0.4s, transform 0.4s';
+      t.style.opacity = '0'; t.style.transform = 'translateY(10px)';
+      setTimeout(() => t.remove(), 400);
+    }, duration);
+  }
+
+  // ──────────────────────────────────────────────────────────────
+  //  MODAL NAT 20 / NAT 1
+  // ──────────────────────────────────────────────────────────────
+  function showNatModal({ isNat20, playerNick, value }) {
+    const el = document.getElementById('modal-nat');
+    document.getElementById('modal-icon').textContent  = isNat20 ? '⚔️' : '💀';
+    document.getElementById('modal-title').textContent = isNat20
+      ? `CRÍTICO! NAT ${value}!`
+      : `FALHA CRÍTICA!`;
+    document.getElementById('modal-title').className = `font-display text-2xl font-black mb-2 ${
+      isNat20 ? 'text-ember-light' : 'text-danger-light'
+    }`;
+    document.getElementById('modal-msg').textContent = isNat20
+      ? `${playerNick} convocou os deuses do dado e tirou um ${value} natural!`
+      : `${playerNick} tropeçou no próprio escudo e tirou 1... Que os deuses tenham piedade.`;
+    el.classList.remove('hidden');
+    setTimeout(() => { if (!el.classList.contains('hidden')) closeNatModal(); }, 5000);
+  }
+
+  function closeNatModal() {
+    document.getElementById('modal-nat').classList.add('hidden');
+  }
+
+  // ──────────────────────────────────────────────────────────────
+  //  LOG DE COMBATE
+  // ──────────────────────────────────────────────────────────────
+  const LOG_MAX = 80;
+  const logLines = [];
+
+  function addLog(msg, type = 'default') {
+    logLines.push({ msg, type, time: nowTime() });
+    if (logLines.length > LOG_MAX) logLines.shift();
+    renderLog();
+  }
+
+  const logColors = {
+    nat20:   'text-ember-light',
+    nat1:    'text-danger-light',
+    join:    'text-green-400',
+    leave:   'text-slate-500',
+    round:   'text-mystic-light',
+    gm:      'text-arcane-light',
+    default: 'text-slate-400',
+  };
+
+  function renderLog() {
+    const logs = [
+      document.getElementById('combat-log'),
+      document.getElementById('combat-log-mobile'),
+    ];
+    logs.forEach(logEl => {
+      if (!logEl) return;
+      logEl.innerHTML = '';
+      [...logLines].reverse().forEach(({ msg, type, time }) => {
+        const div = document.createElement('div');
+        div.className = `log-entry flex items-start gap-1.5 py-1 border-b border-[#0D1120]`;
+        div.innerHTML = `
+          <span class="text-[10px] text-slate-600 flex-none mt-0.5">${time}</span>
+          <span class="${logColors[type] ?? logColors.default}">${escapeHtml(msg)}</span>
+        `;
+        logEl.appendChild(div);
+      });
+    });
+  }
+
+  function escapeHtml(str) {
+    return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  // ──────────────────────────────────────────────────────────────
+  //  RENDERIZAÇÃO DOS CARDS DE JOGADORES
+  // ──────────────────────────────────────────────────────────────
+
+  /** Retorna lista de jogadores ordenados por iniciativa (maior primeiro) */
+  function getSortedPlayers() {
+    return Object.values(state.players)
+      .filter(p => p.online || p.roll !== null)
+      .sort((a, b) => {
+        if (a.roll === null && b.roll === null) return a.nickname.localeCompare(b.nickname);
+        if (a.roll === null) return 1;
+        if (b.roll === null) return -1;
+        if (b.roll !== a.roll) return b.roll - a.roll;
+        // Desempate: quem rolou primeiro
+        return (a.rolledAt ?? 0) - (b.rolledAt ?? 0);
+      });
+  }
+
+  /** Determina classe CSS de cor para o valor do dado */
+  function rollClass(val) {
+    if (val === 20) return 'nat20';
+    if (val === 1)  return 'nat1';
+    return 'normal';
+  }
+
+  /** Ícone SVG de dado D20 mini */
+  function diceIcon(val, highlight = false) {
+    const fill   = highlight ? 'rgba(124,58,237,0.4)' : 'rgba(30,41,66,0.8)';
+    const stroke = highlight ? '#A855F7' : '#2D3F6B';
+    return `
+      <svg width="44" height="44" viewBox="0 0 72 72" class="flex-none">
+        <polygon points="36,6 66,22 66,50 36,66 6,50 6,22" fill="${fill}" stroke="${stroke}" stroke-width="2"/>
+        <polygon points="36,6 66,22 36,30" fill="rgba(255,255,255,0.06)"/>
+        <polygon points="6,22 36,30 36,6" fill="rgba(0,0,0,0.08)"/>
+        ${val !== null ? `<text x="36" y="38" text-anchor="middle" font-family="Cinzel,serif" font-size="${val >= 10 ? '14' : '16'}" font-weight="900" fill="${highlight ? '#C084FC' : '#94A3B8'}" dy="0.3em">${val}</text>` : ''}
+      </svg>`;
+  }
+
+  /** Renderiza um card de jogador */
+  function buildPlayerCard(player, rank, total) {
+    const isMe      = player.id === state.userId;
+    const colors    = colorFromString(player.nickname);
+    const hasRolled = player.roll !== null;
+    const rClass    = rollClass(player.roll);
+    const isMine    = isMe;
+
+    // Porcentagem da barra de ranking
+    const maxRoll  = Math.max(...Object.values(state.players).map(p => p.roll ?? 0), 1);
+    const barWidth = hasRolled ? Math.round((player.roll / 20) * 100) : 0;
+
+    // Badge de ranking
+    const rankBadgeClass = rank === 0 ? 'rank-1' : rank === 1 ? 'rank-2' : rank === 2 ? 'rank-3' : 'rank-n';
+    const rankLabel      = hasRolled ? (rank + 1) : '?';
+
+    return `
+      <div
+        id="card-${player.id}"
+        class="player-card bg-[#0D1120] border rounded-xl p-4 flex flex-col gap-3
+               ${isMine ? 'border-arcane/60 shadow-arcane/20' : 'border-[#1E2942] hover:border-[#2D3F6B]'}
+               ${!player.online ? 'opacity-60' : ''}"
+        style="${isMine ? 'box-shadow: 0 0 0 1px rgba(124,58,237,0.2) inset;' : ''}"
+      >
+        <!-- Linha topo: avatar + nome + rank + status -->
+        <div class="flex items-center gap-3">
+
+          <!-- Avatar circular -->
+          <div class="relative flex-none">
+            <div class="w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold text-white select-none"
+                 style="background: linear-gradient(135deg, ${colors[0]}, ${colors[1]});">
+              ${initials(player.nickname)}
+            </div>
+            <!-- Ponto de status online/offline -->
+            <span class="absolute -bottom-0.5 -right-0.5 status-dot ${player.online ? 'online' : 'offline'}"></span>
+          </div>
+
+          <!-- Nome + badge GM/Eu -->
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-1.5 flex-wrap">
+              <span class="font-semibold text-sm text-white truncate">${escapeHtml(player.nickname)}</span>
+              ${isMine  ? '<span class="text-[9px] bg-arcane/20 text-arcane-light border border-arcane/30 px-1.5 py-0.5 rounded-full font-bold">EU</span>' : ''}
+              ${player.isGM ? '<span class="text-[9px] bg-mystic/10 text-mystic-light border border-mystic/30 px-1.5 py-0.5 rounded-full font-bold">GM</span>' : ''}
+            </div>
+            <div class="text-[11px] text-slate-500 mt-0.5">
+              ${player.online ? 'Online' : 'Offline'} · ${hasRolled ? `Rolou às ${player.rolledAtStr ?? '?'}` : 'Aguardando...'}
+            </div>
+          </div>
+
+          <!-- Badge de ranking -->
+          <div class="rank-badge ${rankBadgeClass} flex-none" data-tooltip="Posição na iniciativa">
+            ${rankLabel}
+          </div>
+        </div>
+
+        <!-- Valor do dado grande -->
+        <div class="flex items-center justify-between">
+          <div>
+            ${hasRolled
+              ? `<div class="dice-value ${rClass}">${player.roll}</div>
+                 <div class="text-[11px] mt-0.5 ${rClass === 'nat20' ? 'text-ember-light font-bold' : rClass === 'nat1' ? 'text-danger-light font-bold' : 'text-slate-500'}">
+                   ${rClass === 'nat20' ? '⚔️ CRÍTICO NATURAL!' : rClass === 'nat1' ? '💀 FALHA CRÍTICA!' : 'D20'}
+                 </div>`
+              : `<div class="dice-value" style="color:#2D3F6B;">—</div>
+                 <div class="text-[11px] text-slate-600 mt-0.5">Não rolou</div>`
+            }
+          </div>
+          <!-- Ícone dado -->
+          ${diceIcon(player.roll, isMine)}
+        </div>
+
+        <!-- Barra de progresso proporcional -->
+        <div class="space-y-1">
+          <div class="flex justify-between text-[10px] text-slate-600">
+            <span>Iniciativa</span>
+            <span>${hasRolled ? `${player.roll}/20` : '?'}</span>
+          </div>
+          <div class="h-1 bg-[#1E2942] rounded-full overflow-hidden">
+            <div class="rank-bar"
+                 style="width: ${barWidth}%;
+                        background: ${rClass === 'nat20' ? 'linear-gradient(90deg,#F59E0B,#FCD34D)' : rClass === 'nat1' ? '#EF4444' : 'linear-gradient(90deg,#7C3AED,#06B6D4)'}">
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  /** Renderiza o grid completo de jogadores */
+  function renderPlayersGrid() {
+    const grid    = document.getElementById('players-grid');
+    const empty   = document.getElementById('empty-state');
+    const sorted  = getSortedPlayers();
+    const online  = Object.values(state.players).filter(p => p.online).length;
+
+    // Atualiza contador do header
+    document.getElementById('header-players-count').textContent = online;
+    document.getElementById('roll-status-text').textContent =
+      sorted.filter(p => p.roll !== null).length + '/' + sorted.length + ' rolaram';
+
+    if (sorted.length === 0) {
+      if (!empty.style.display || empty.style.display === 'none') {
+        empty.style.display = 'flex';
+        grid.innerHTML = '';
+        grid.appendChild(empty);
+      }
+      return;
+    }
+
+    // Esconde estado vazio
+    empty.style.display = 'none';
+
+    // Reconstrói apenas os cards (evita flash total na tela)
+    const newHtml = sorted.map((p, i) => buildPlayerCard(p, i, sorted.length)).join(
+      `<div class="initiative-divider col-span-full hidden"></div>`
+    );
+
+    // Só re-renderiza se algo mudou
+    if (grid.dataset.lastHash !== newHtml.length.toString()) {
+      grid.dataset.lastHash = newHtml.length.toString();
+      grid.innerHTML = newHtml;
+    }
+
+    // Atualiza barra própria
+    updateMyStatusBar();
+  }
+
+  /** Atualiza a barra de status compacta do próprio jogador */
+  function updateMyStatusBar() {
+    const bar  = document.getElementById('my-status-bar');
+    const nick = document.getElementById('my-nickname-sm');
+    const roll = document.getElementById('my-roll-sm');
+    const val  = document.getElementById('my-value-sm');
+
+    if (!state.nickname) { bar.classList.add('hidden'); return; }
+
+    bar.classList.remove('hidden');
+    bar.classList.add('flex');
+    nick.textContent = state.nickname;
+
+    if (state.myRoll !== null) {
+      roll.textContent = `Rolou ${state.myRoll} — ${rollClass(state.myRoll) === 'nat20' ? '⚔️ CRÍTICO!' : rollClass(state.myRoll) === 'nat1' ? '💀 FALHA!' : 'OK'}`;
+      val.textContent  = state.myRoll;
+      val.className    = `font-display text-xl font-black dice-value ${rollClass(state.myRoll)}`;
+    } else {
+      roll.textContent = 'Não rolou ainda';
+      val.textContent  = '—';
+      val.className    = 'font-display text-xl font-black text-slate-600';
+    }
+
+    // Avatar mini
+    const colors = colorFromString(state.nickname);
+    const avatars = [document.getElementById('my-avatar-sm'), document.getElementById('header-avatar')];
+    avatars.forEach(av => {
+      if (!av) return;
+      av.textContent = initials(state.nickname);
+      av.style.background = `linear-gradient(135deg, ${colors[0]}, ${colors[1]})`;
+    });
+  }
+
+  // ──────────────────────────────────────────────────────────────
+  //  ANIMAÇÃO DO CARD AO RECEBER ROLAGEM
+  // ──────────────────────────────────────────────────────────────
+  function animateCard(userId, value) {
+    const card = document.getElementById(`card-${userId}`);
+    if (!card) return;
+
+    card.classList.remove('rolling', 'nat20-effect', 'nat1-effect');
+    void card.offsetWidth; // re-flow para reiniciar animação
+
+    if (value === 20) {
+      card.classList.add('nat20-effect');
+      spawnParticles(card);
+    } else if (value === 1) {
+      card.classList.add('nat1-effect');
+    } else {
+      card.classList.add('rolling');
+    }
+
+    // Remove classes após animação
+    setTimeout(() => card.classList.remove('rolling', 'nat20-effect', 'nat1-effect'), 900);
+  }
+
+  // ──────────────────────────────────────────────────────────────
+  //  ROLAGEM DO DADO
+  // ──────────────────────────────────────────────────────────────
+  async function rollDice() {
+    if (state.rolling) return;
+
+    // Garante contexto de áudio (exige gesto do usuário)
+    try { await getAudioContext().resume(); } catch (_) {}
+
+    state.rolling = true;
+    const btn  = document.getElementById('btn-roll');
+    const txt  = document.getElementById('btn-roll-text');
+    btn.disabled = true;
+    txt.textContent = 'Rolando...';
+
+    // Gera resultado localmente (não confia no servidor para RNG)
+    const value = Math.floor(Math.random() * 20) + 1;
+
+    // Pequeno delay de "suspense" com animação de shake no próprio card
+    const myCard = document.getElementById(`card-${state.userId}`);
+    if (myCard) { myCard.classList.add('rolling'); }
+    playSoundRoll();
+
+    await new Promise(r => setTimeout(r, 700));
+
+    // Som especial
+    if (value === 20) playSoundNat20();
+    if (value === 1)  playSoundNat1();
+
+    // Atualiza estado local imediatamente (sem esperar broadcast)
+    const now = Date.now();
+    state.myRoll  = value;
+    state.hasRolled = true;
+
+    if (state.players[state.userId]) {
+      state.players[state.userId].roll       = value;
+      state.players[state.userId].rolledAt   = now;
+      state.players[state.userId].rolledAtStr = nowTime();
+    }
+
+    // Animação e re-render
+    renderPlayersGrid();
+    setTimeout(() => animateCard(state.userId, value), 50);
+
+    // Notificações especiais
+    if (value === 20) {
+      showToast(`🎲 NAT 20! Você é abençoado pelos dados!`, 'nat20', 5000);
+      showNatModal({ isNat20: true, playerNick: state.nickname, value });
+    } else if (value === 1) {
+      showToast(`💀 Falha Crítica... O dado te traiu.`, 'error', 4000);
+      showNatModal({ isNat20: false, playerNick: state.nickname, value });
+    } else {
+      showToast(`🎲 Você rolou ${value}!`, 'success', 2500);
+    }
+
+    // Log local
+    const logType = value === 20 ? 'nat20' : value === 1 ? 'nat1' : 'default';
+    addLog(`${state.nickname} rolou ${value}${value === 20 ? ' — CRÍTICO!' : value === 1 ? ' — FALHA!' : ''}`, logType);
+
+    // Envia via Supabase Realtime
+    await broadcastRoll(value, now);
+
+    // Reabilita botão após 2s (evita spam)
+    setTimeout(() => {
+      state.rolling = false;
+      btn.disabled  = false;
+      txt.textContent = 'ROLAR D20';
+    }, 2000);
+  }
+
+  // ──────────────────────────────────────────────────────────────
+  //  SUPABASE — BROADCAST / REALTIME
+  // ──────────────────────────────────────────────────────────────
+
+  /** Envia evento de rolagem para todos na sala */
+  async function broadcastRoll(value, timestamp) {
+    if (!channel) return;
+    await channel.send({
+      type: 'broadcast',
+      event: 'dice_roll',
+      payload: {
+        userId:     state.userId,
+        nickname:   state.nickname,
+        isGM:       state.isGM,
+        roll:       value,
+        rolledAt:   timestamp,
+        rolledAtStr: nowTime(),
+        round:      state.round,
+      },
+    });
+  }
+
+  /** Envia evento de nova rodada (apenas GM) */
+  async function broadcastNextRound() {
+    if (!channel || !state.isGM) return;
+    const newRound = state.round + 1;
+    await channel.send({
+      type: 'broadcast',
+      event: 'next_round',
+      payload: { round: newRound, gmId: state.userId },
+    });
+    applyNextRound(newRound);
+  }
+
+  /** Envia evento de limpar rolls (apenas GM) */
+  async function broadcastClearRolls() {
+    if (!channel || !state.isGM) return;
+    await channel.send({
+      type: 'broadcast',
+      event: 'clear_rolls',
+      payload: { gmId: state.userId },
+    });
+    applyClearRolls();
+  }
+
+  /** Aplica nova rodada localmente */
+  function applyNextRound(round) {
+    state.round     = round;
+    state.myRoll    = null;
+    state.hasRolled = false;
+    Object.values(state.players).forEach(p => { p.roll = null; p.rolledAt = null; p.rolledAtStr = null; });
+    document.getElementById('header-round').textContent = round;
+    document.getElementById('round-badge').textContent  = `Rodada ${round}`;
+    addLog(`── Rodada ${round} iniciada pelo GM ──`, 'round');
+    renderPlayersGrid();
+    const btn = document.getElementById('btn-roll');
+    btn.disabled = false;
+    document.getElementById('btn-roll-text').textContent = 'ROLAR D20';
+    showToast(`⚔️ Rodada ${round} começou!`, 'info');
+  }
+
+  /** Aplica limpeza de rolls localmente */
+  function applyClearRolls() {
+    state.myRoll    = null;
+    state.hasRolled = false;
+    Object.values(state.players).forEach(p => { p.roll = null; p.rolledAt = null; p.rolledAtStr = null; });
+    addLog('GM limpou as iniciativas da rodada.', 'gm');
+    renderPlayersGrid();
+    const btn = document.getElementById('btn-roll');
+    btn.disabled = false;
+    document.getElementById('btn-roll-text').textContent = 'ROLAR D20';
+    showToast('🗑️ Iniciativas limpas pelo GM', 'info');
+  }
+
+  // ──────────────────────────────────────────────────────────────
+  //  ENTRADA NA SALA — INICIALIZAÇÃO DO SUPABASE
+  // ──────────────────────────────────────────────────────────────
+  async function enterRoom(nickname, room, isGM) {
+    state.nickname  = nickname;
+    state.room      = room;
+    state.isGM      = isGM;
+    state.userId    = genUUID();
+    state.round     = 1;
+    state.myRoll    = null;
+    state.hasRolled = false;
+    state.players   = {};
+
+    // Salva no localStorage
+    localStorage.setItem(LS_NICKNAME, nickname);
+    localStorage.setItem(LS_ROOM, room);
+    localStorage.setItem(LS_IS_GM, isGM ? '1' : '0');
+
+    // Inicializa player local no estado
+    state.players[state.userId] = {
+      id:         state.userId,
+      nickname,
+      isGM,
+      roll:       null,
+      rolledAt:   null,
+      rolledAtStr: null,
+      online:     true,
+    };
+
+    // ── Configura UI ──
+    showGameScreen();
+
+    // ── Conecta ao Supabase Realtime ──
+    try {
+      await connectRealtime(room);
+    } catch (err) {
+      console.error('Supabase error:', err);
+      showToast('⚠️ Modo offline: Supabase não configurado.', 'error', 6000);
+      addLog('Modo local ativo (Supabase não configurado).', 'gm');
+    }
+
+    addLog(`Você entrou na sala "${room}" como ${isGM ? 'Mestre' : 'Jogador'}.`, 'join');
+    renderPlayersGrid();
+  }
+
+  /** Conecta aos canais Realtime do Supabase */
+  async function connectRealtime(room) {
+    // Validação básica das credenciais
+    if (SUPABASE_URL.includes('SEU_PROJETO') || SUPABASE_ANON_KEY.includes('sua_anon_key')) {
+      throw new Error('Credenciais Supabase não configuradas');
+    }
+
+    // Cria cliente Supabase
+    supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    // ── Canal principal de eventos (Broadcast) ──
+    // Nome do canal inclui o ID da sala para isolamento
+    channel = supabase.channel(`initiative:${room}`, {
+      config: {
+        broadcast: { self: false }, // não recebe o próprio broadcast (já aplicado localmente)
+        presence:  { key: state.userId },
+      },
+    });
+
+    // ── Listener: rolagem de dado recebida ──
+    channel.on('broadcast', { event: 'dice_roll' }, ({ payload }) => {
+      const p = payload;
+      if (!p.userId || !p.nickname) return;
+
+      // Atualiza ou cria o player no estado
+      if (!state.players[p.userId]) {
+        state.players[p.userId] = {
+          id:         p.userId,
+          nickname:   p.nickname,
+          isGM:       p.isGM ?? false,
+          roll:       null,
+          rolledAt:   null,
+          rolledAtStr: null,
+          online:     true,
+        };
+      }
+      state.players[p.userId].roll       = p.roll;
+      state.players[p.userId].rolledAt   = p.rolledAt;
+      state.players[p.userId].rolledAtStr = p.rolledAtStr;
+
+      renderPlayersGrid();
+      animateCard(p.userId, p.roll);
+
+      // Sons e notificações
+      if (p.roll === 20) {
+        playSoundNat20();
+        showToast(`⚔️ ${p.nickname} tirou NAT 20! CRÍTICO!`, 'nat20', 5000);
+        showNatModal({ isNat20: true, playerNick: p.nickname, value: p.roll });
+        spawnParticles(document.getElementById(`card-${p.userId}`));
+      } else if (p.roll === 1) {
+        playSoundNat1();
+        showToast(`💀 ${p.nickname} falhou criticamente!`, 'error', 4000);
+      } else {
+        playSoundRoll();
+        showToast(`🎲 ${p.nickname} rolou ${p.roll}`, 'info', 2000);
+      }
+
+      const logType = p.roll === 20 ? 'nat20' : p.roll === 1 ? 'nat1' : 'default';
+      addLog(`${p.nickname} rolou ${p.roll}${p.roll === 20 ? ' — CRÍTICO!' : p.roll === 1 ? ' — FALHA!' : ''}`, logType);
+    });
+
+    // ── Listener: próxima rodada ──
+    channel.on('broadcast', { event: 'next_round' }, ({ payload }) => {
+      applyNextRound(payload.round);
+    });
+
+    // ── Listener: limpar rolls ──
+    channel.on('broadcast', { event: 'clear_rolls' }, () => {
+      applyClearRolls();
+    });
+
+    // ── Presence: rastreia quem está online na sala ──
+    channel.on('presence', { event: 'sync' }, () => {
+      const presState = channel.presenceState();
+
+      // Marca todos como offline primeiro
+      Object.values(state.players).forEach(p => { p.online = false; });
+
+      // Atualiza com presença atual
+      Object.values(presState).forEach(presences => {
+        presences.forEach(presence => {
+          const uid = presence.userId;
+          if (!uid) return;
+          if (!state.players[uid]) {
+            state.players[uid] = {
+              id:         uid,
+              nickname:   presence.nickname ?? 'Anônimo',
+              isGM:       presence.isGM ?? false,
+              roll:       null,
+              rolledAt:   null,
+              rolledAtStr: null,
+              online:     true,
+            };
+          } else {
+            state.players[uid].online = true;
+          }
+        });
+      });
+
+      renderPlayersGrid();
+    });
+
+    channel.on('presence', { event: 'join' }, ({ newPresences }) => {
+      newPresences.forEach(p => {
+        const nick = p.nickname ?? 'Alguém';
+        if (p.userId !== state.userId) {
+          addLog(`${nick} entrou na sala.`, 'join');
+          showToast(`👤 ${nick} entrou na sala!`, 'success', 3000);
+        }
+      });
+    });
+
+    channel.on('presence', { event: 'leave' }, ({ leftPresences }) => {
+      leftPresences.forEach(p => {
+        const nick = p.nickname ?? 'Alguém';
+        if (p.userId !== state.userId) {
+          addLog(`${nick} saiu da sala.`, 'leave');
+        }
+        // Mantém o jogador no estado (com roll), mas marca offline
+        if (state.players[p.userId]) {
+          state.players[p.userId].online = false;
+        }
+      });
+      renderPlayersGrid();
+    });
+
+    // ── Inscreve no canal e anuncia presença ──
+    await channel.subscribe(async (status) => {
+      if (status === 'SUBSCRIBED') {
+        // Anuncia presença com dados do jogador
+        await channel.track({
+          userId:   state.userId,
+          nickname: state.nickname,
+          isGM:     state.isGM,
+          joinedAt: Date.now(),
+        });
+        addLog(`Conectado ao canal "${room}" via Supabase Realtime.`, 'gm');
+      } else if (status === 'CHANNEL_ERROR') {
+        showToast('❌ Erro no canal Realtime. Verifique suas credenciais Supabase.', 'error', 8000);
+      }
+    });
+  }
+
+  // ──────────────────────────────────────────────────────────────
+  //  CONTROLE DE TELAS
+  // ──────────────────────────────────────────────────────────────
+  function showGameScreen() {
+    document.getElementById('screen-login').classList.add('hidden');
+    const game = document.getElementById('screen-game');
+    game.classList.remove('hidden');
+    game.classList.add('flex');
+
+    // Header
+    document.getElementById('header-room').textContent = `#${state.room}`;
+    document.getElementById('sidebar-room').textContent = state.room;
+
+    // Botões GM
+    if (state.isGM) {
+      document.getElementById('btn-next-round').classList.remove('hidden');
+      document.getElementById('btn-clear-rolls').classList.remove('hidden');
+    }
+
+    // FAB mobile
+    document.getElementById('fab-log').classList.remove('hidden');
+    document.getElementById('fab-log').classList.add('flex');
+
+    // Atualiza barra própria
+    updateMyStatusBar();
+  }
+
+  function showLoginScreen() {
+    document.getElementById('screen-game').classList.add('hidden');
+    document.getElementById('screen-game').classList.remove('flex');
+    document.getElementById('screen-login').classList.remove('hidden');
+  }
+
+  // ──────────────────────────────────────────────────────────────
+  //  SAIR DA SALA
+  // ──────────────────────────────────────────────────────────────
+  async function leaveRoom() {
+    if (channel) {
+      await channel.untrack();
+      await channel.unsubscribe();
+      channel = null;
+    }
+    state.players   = {};
+    state.myRoll    = null;
+    state.hasRolled = false;
+    logLines.length = 0;
+    showLoginScreen();
+  }
+
+  // ──────────────────────────────────────────────────────────────
+  //  VERIFICAÇÃO DO SUPABASE NA TELA DE LOGIN
+  // ──────────────────────────────────────────────────────────────
+  function checkSupabaseConfig() {
+    const el = document.getElementById('supabase-status');
+    const ok = !SUPABASE_URL.includes('SEU_PROJETO') && !SUPABASE_ANON_KEY.includes('sua_anon_key');
+    if (ok) {
+      el.innerHTML = `<span class="text-green-400 text-xs">✓ Supabase configurado — Multiplayer ativo</span>`;
+    } else {
+      el.innerHTML = `
+        <span class="text-amber-400 text-xs">
+          ⚠️ Supabase não configurado — Modo local (1 jogador)
+          <br><a href="#guia-supabase" class="underline text-amber-300">Ver como configurar abaixo</a>
+        </span>`;
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────────
+  //  INICIALIZAÇÃO — EVENT LISTENERS
+  // ──────────────────────────────────────────────────────────────
+  document.addEventListener('DOMContentLoaded', () => {
+
+    // Verifica config do Supabase
+    checkSupabaseConfig();
+
+    // Preenche campos do localStorage
+    const savedNick = localStorage.getItem(LS_NICKNAME) ?? '';
+    const savedRoom = localStorage.getItem(LS_ROOM)     ?? '';
+    const savedGM   = localStorage.getItem(LS_IS_GM) === '1';
+    document.getElementById('input-nickname').value    = savedNick;
+    document.getElementById('input-room').value        = savedRoom || 'sala-padrao';
+    document.getElementById('checkbox-gm').checked     = savedGM;
+
+    // ── Botão Entrar ──
+    document.getElementById('btn-enter').addEventListener('click', () => {
+      const nick = document.getElementById('input-nickname').value.trim();
+      const room = document.getElementById('input-room').value.trim().toLowerCase().replace(/[^a-z0-9\-_]/g, '-');
+      const isGM = document.getElementById('checkbox-gm').checked;
+
+      if (!nick) {
+        showToast('Digite seu nome/nickname!', 'error');
+        document.getElementById('input-nickname').focus();
+        return;
+      }
+      if (!room) {
+        showToast('Digite o ID da sala!', 'error');
+        document.getElementById('input-room').focus();
+        return;
+      }
+      enterRoom(nick, room, isGM);
+    });
+
+    // Enter nos inputs
+    ['input-nickname','input-room'].forEach(id => {
+      document.getElementById(id).addEventListener('keydown', e => {
+        if (e.key === 'Enter') document.getElementById('btn-enter').click();
+      });
+    });
+
+    // ── Botão Rolar ──
+    document.getElementById('btn-roll').addEventListener('click', rollDice);
+
+    // ── Botões GM ──
+    document.getElementById('btn-next-round').addEventListener('click', async () => {
+      if (!state.isGM) return;
+      await broadcastNextRound();
+    });
+
+    document.getElementById('btn-clear-rolls').addEventListener('click', async () => {
+      if (!state.isGM) return;
+      if (!confirm('Limpar todas as iniciativas desta rodada?')) return;
+      await broadcastClearRolls();
+    });
+
+    // ── Botão Sair ──
+    document.getElementById('btn-leave').addEventListener('click', async () => {
+      await leaveRoom();
+    });
+
+    // ── Limpar log ──
+    document.getElementById('btn-clear-log').addEventListener('click', () => {
+      logLines.length = 0;
+      renderLog();
+    });
+
+    // ── FAB Log Mobile ──
+    document.getElementById('fab-log').addEventListener('click', () => {
+      document.getElementById('modal-log').classList.remove('hidden');
+    });
+
+    // ── Fechar modal ao clicar fora ──
+    document.getElementById('modal-nat').addEventListener('click', (e) => {
+      if (e.target === document.getElementById('modal-nat')) closeNatModal();
+    });
+
+    // Atalho de teclado: Espaço para rolar
+    document.addEventListener('keydown', (e) => {
+      if (e.code === 'Space' && document.getElementById('screen-game').style.display !== 'none'
+          && !document.getElementById('screen-game').classList.contains('hidden')
+          && !e.target.matches('input,textarea,button')) {
+        e.preventDefault();
+        rollDice();
+      }
+    });
+  });
+  </script>
+
+  <!-- ════════════════════════════════════════════
+       GUIA DE CONFIGURAÇÃO (visível na página)
+       Removido em produção se preferir
+  ════════════════════════════════════════════ -->
+  <div id="guia-supabase" style="display:none;">
+    <!-- Referência interna para link âncora -->
+  </div>
+
+</body>
+</html>
+```
