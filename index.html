@@ -5,13 +5,14 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>D20 Initiative Tracker · RPG Online</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎲</text></svg>">
   <meta name="description" content="Sistema de iniciativa D20 multiplayer em tempo real para RPG de mesa" />
 
   <!-- ════════════════════════════════════════════
        DEPENDÊNCIAS VIA CDN
   ════════════════════════════════════════════ -->
   <!-- Tailwind CSS v3 -->
-  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
 
   <!-- Google Fonts: Cinzel (display épico) + Inter (UI) -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -739,7 +740,7 @@
   const LS_ROOM     = 'rpg_initiative_room';
   const LS_IS_GM    = 'rpg_initiative_isgm';
 
-  let supabase        = null;   // cliente Supabase
+  let supabaseClient  = null;   // cliente Supabase
   let channel         = null;   // canal Realtime ativo
   let presenceChannel = null;   // canal de Presença
 
