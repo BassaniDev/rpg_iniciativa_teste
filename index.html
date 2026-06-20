@@ -55,12 +55,12 @@
         <button id="btn-enter" type="submit" class="btn-primary btn-block">Entrar na Sala</button>
       </form>
 
-      <div id="supabase-status" class="supabase-status">
-        <span class="text-muted">Verificando configuração...</span>
+      <div id="connection-status" class="connection-status">
+        <span class="text-muted">Verificando conexão...</span>
       </div>
 
       <p class="login-footnote">
-        Hospedado em GitHub Pages · Powered by Supabase Realtime
+        Hospedado em GitHub Pages · Sincronização em tempo real
       </p>
     </div>
   </main>
@@ -161,7 +161,10 @@
         <!-- ── ÁREA DE ROLAGEM (fixa na base) ── -->
         <div class="roll-bar">
           <div id="my-status-bar" class="my-status-bar hidden">
-            <div id="my-avatar-sm" class="avatar-circle avatar-sm">?</div>
+            <button id="btn-change-avatar" class="avatar-button" type="button" title="Trocar foto de perfil">
+              <div id="my-avatar-sm" class="avatar-circle avatar-sm">?</div>
+              <span class="avatar-edit-badge" aria-hidden="true">✎</span>
+            </button>
             <div class="my-status-info">
               <div id="my-nickname-sm" class="my-status-name">—</div>
               <div id="my-roll-sm" class="my-status-roll">Não rolou ainda</div>
@@ -223,6 +226,42 @@
       <div class="modal-actions">
         <button id="btn-modifier-cancel" class="btn-ghost" type="button">Cancelar</button>
         <button id="btn-modifier-confirm" class="btn-primary" type="button">Confirmar e Rolar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ════════════════════════════════════════════
+       MODAL: CONFIRMAÇÃO DE RE-ROLL
+  ════════════════════════════════════════════ -->
+  <div id="modal-reroll" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="reroll-title">
+    <div class="modal-box modal-box-center">
+      <div class="modal-icon">🔁</div>
+      <h2 id="reroll-title" class="modal-title">Fazer Re-roll?</h2>
+      <p class="modal-message">Você já rolou iniciativa nesta rodada. Tem certeza que deseja rolar novamente? O resultado anterior será substituído e o re-roll ficará registrado no log de combate.</p>
+      <div class="modal-actions modal-actions-center">
+        <button id="btn-reroll-cancel" class="btn-ghost" type="button">Cancelar</button>
+        <button id="btn-reroll-confirm" class="btn-primary" type="button">Sim, Re-rollar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ════════════════════════════════════════════
+       MODAL: TROCAR FOTO DE PERFIL
+  ════════════════════════════════════════════ -->
+  <div id="modal-avatar" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="avatar-title">
+    <div class="modal-box modal-box-center">
+      <h2 id="avatar-title" class="modal-title">Foto de Perfil</h2>
+      <div id="avatar-preview-wrap" class="avatar-preview-wrap">
+        <div id="avatar-preview" class="avatar-circle avatar-preview">?</div>
+      </div>
+      <p class="modal-subtext">Escolha uma imagem (PNG, JPG ou WEBP, até 2MB).</p>
+      <input id="input-avatar-file" type="file" accept="image/png,image/jpeg,image/webp" class="avatar-file-input" />
+      <label for="input-avatar-file" class="btn-ghost btn-block avatar-file-label">Escolher Imagem</label>
+      <p id="avatar-upload-status" class="modal-subtext avatar-upload-status"></p>
+      <div class="modal-actions modal-actions-center">
+        <button id="btn-avatar-remove" class="btn-ghost" type="button">Usar Iniciais</button>
+        <button id="btn-avatar-cancel" class="btn-ghost" type="button">Cancelar</button>
+        <button id="btn-avatar-save" class="btn-primary" type="button" disabled>Salvar Foto</button>
       </div>
     </div>
   </div>

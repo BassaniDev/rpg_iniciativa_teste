@@ -35,6 +35,13 @@ const ROOM_MAX_LEN = 40;
 const MODIFIER_MIN = -99;
 const MODIFIER_MAX = 99;
 
+// 🖼️ Bucket do Supabase Storage usado para fotos de perfil. Precisa ser
+// criado manualmente no painel do Supabase como bucket PÚBLICO — veja
+// a seção "Fotos de Perfil (Avatar Upload)" no SETUP.md.
+const AVATAR_BUCKET = 'avatars';
+const AVATAR_MAX_BYTES = 2 * 1024 * 1024; // 2MB
+const AVATAR_ALLOWED_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
+
 let supabaseClient = null;
 let channel = null;
 
@@ -55,6 +62,7 @@ const state = {
   enemies: {}, // { enemyId: EnemyProfile } — perfis criados pelo GM
   userId: '',
   pendingModifierContext: null, // guarda o que fazer quando o modal de modificador confirmar
+  avatarUrl: null, // URL pública da foto de perfil (Supabase Storage), null = usa iniciais
 };
 
 const logLines = [];
@@ -104,6 +112,28 @@ function initials(nick) {
   return safe ? safe.slice(0, 2).toUpperCase() : '??';
 }
 
+/**
+ * Gera os atributos HTML (class + style) para um círculo de avatar,
+ * usando a foto de perfil quando disponível ou caindo de volta para
+ * o gradiente de iniciais. Centralizado aqui para que TODOS os pontos
+ * de renderização (card, sala de espera, status bar, header) fiquem
+ * consistentes — evita ter essa lógica duplicada em 4 lugares.
+ */
+function avatarVisual(displayName, avatarUrl) {
+  if (avatarUrl) {
+    // 🔒 Escapa a URL antes de injetar em atributo inline — mesmo vindo
+    // do nosso próprio Storage, nunca confiamos em string crua em HTML.
+    const safeUrl = escapeHtml(avatarUrl);
+    return { className: 'avatar-circle has-photo', styleExtra: `background-image:url('${safeUrl}');`, label: '' };
+  }
+  const colors = colorFromString(displayName);
+  return {
+    className: 'avatar-circle',
+    styleExtra: `background:linear-gradient(135deg, ${colors[0]}, ${colors[1]});`,
+    label: initials(displayName),
+  };
+}
+
 function escapeHtml(str) {
   return String(str ?? '')
     .replace(/&/g, '&amp;')
@@ -139,74 +169,6 @@ function safeInt(value, fallback = 0, min = -999, max = 999) {
 /** Rola 1dN usando Math.random (PRNG do navegador). */
 function rollDie(sides = DICE_MAX) {
   return Math.floor(Math.random() * sides) + 1;
-}
-
-// ──────────────────────────────────────────────────────────────
-//  WEB AUDIO API — SONS (sem biblioteca externa)
-// ──────────────────────────────────────────────────────────────
-let audioCtx = null;
-
-function getAudioContext() {
-  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  return audioCtx;
-}
-
-function playSoundRoll() {
-  try {
-    const ctx = getAudioContext();
-    const buf = ctx.createBuffer(1, ctx.sampleRate * 0.3, ctx.sampleRate);
-    const data = buf.getChannelData(0);
-    for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / data.length);
-    const src = ctx.createBufferSource();
-    const filter = ctx.createBiquadFilter();
-    const gain = ctx.createGain();
-    filter.type = 'bandpass';
-    filter.frequency.value = 800;
-    gain.gain.setValueAtTime(0.3, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
-    src.buffer = buf;
-    src.connect(filter);
-    filter.connect(gain);
-    gain.connect(ctx.destination);
-    src.start();
-  } catch (_) { /* silencioso se o áudio estiver bloqueado pelo navegador */ }
-}
-
-function playSoundNat20() {
-  try {
-    const ctx = getAudioContext();
-    const now = ctx.currentTime;
-    const gain = ctx.createGain();
-    gain.gain.setValueAtTime(0.3, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 1.5);
-    gain.connect(ctx.destination);
-    [261.63, 329.63, 392.0, 523.25].forEach((freq, i) => {
-      const osc = ctx.createOscillator();
-      osc.type = 'sine';
-      osc.frequency.value = freq;
-      osc.connect(gain);
-      osc.start(now + i * 0.08);
-      osc.stop(now + 1.5);
-    });
-  } catch (_) {}
-}
-
-function playSoundNat1() {
-  try {
-    const ctx = getAudioContext();
-    const now = ctx.currentTime;
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = 'sawtooth';
-    osc.frequency.setValueAtTime(300, now);
-    osc.frequency.exponentialRampToValueAtTime(60, now + 0.6);
-    gain.gain.setValueAtTime(0.2, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.6);
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.start(now);
-    osc.stop(now + 0.6);
-  } catch (_) {}
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -292,6 +254,7 @@ const logColors = {
   leave: 'log-msg-leave',
   round: 'log-msg-round',
   gm: 'log-msg-gm',
+  reroll: 'log-msg-reroll',
   default: 'log-msg-default',
 };
 
@@ -394,11 +357,11 @@ function renderWaitingRoom() {
 
   list.innerHTML = waiting
     .map((p) => {
-      const colors = colorFromString(p.nickname);
       const displayName = resolveDisplayName(p);
+      const av = avatarVisual(displayName, p.avatarUrl);
       return `
         <div class="waiting-chip">
-          <div class="avatar-circle" style="background:linear-gradient(135deg, ${colors[0]}, ${colors[1]});">${initials(displayName)}</div>
+          <div class="${av.className}" style="${av.styleExtra}">${av.label}</div>
           <span class="waiting-chip-name">${escapeHtml(displayName)}</span>
           ${p.isGM ? '<span class="waiting-chip-tag">GM</span>' : ''}
         </div>`;
@@ -424,7 +387,11 @@ function resolveDisplayName(record) {
 function buildPlayerCard(player, rank) {
   const isMe = player.id === state.userId;
   const displayName = resolveDisplayName(player);
-  const colors = colorFromString(displayName);
+  // 🖼️ Inimigos em Modo Furtivo nunca expõem a foto real do perfil do
+  // inimigo para jogadores comuns — junto com o nome, a foto também
+  // cai para o avatar genérico de iniciais ("IO") quando ocultos.
+  const avatarUrlForDisplay = player.isEnemy && player.hidden && !state.isGM ? null : player.avatarUrl;
+  const av = avatarVisual(displayName, avatarUrlForDisplay);
   const hasRolled = player.roll !== null;
   const rClass = rollClass(player.roll);
   const barWidth = hasRolled ? Math.max(0, Math.min(100, Math.round((player.total / DICE_MAX) * 100))) : 0;
@@ -452,7 +419,7 @@ function buildPlayerCard(player, rank) {
     <div id="card-${player.id}" class="${cardClasses}">
       <div class="card-top-row">
         <div class="avatar-wrap">
-          <div class="avatar-circle" style="background:linear-gradient(135deg, ${colors[0]}, ${colors[1]});">${initials(displayName)}</div>
+          <div class="${av.className}" style="${av.styleExtra}">${av.label}</div>
           <span class="status-dot ${player.online ? 'online' : 'offline'}"></span>
         </div>
         <div class="card-name-block">
@@ -461,6 +428,7 @@ function buildPlayerCard(player, rank) {
             ${isMe ? '<span class="card-tag card-tag-me">EU</span>' : ''}
             ${player.isGM ? '<span class="card-tag card-tag-gm">GM</span>' : ''}
             ${player.isEnemy ? '<span class="card-tag card-tag-enemy">Inimigo</span>' : ''}
+            ${hasRolled && player.isReroll ? '<span class="card-tag card-tag-reroll">🔁 Re-roll</span>' : ''}
           </div>
           <div class="card-subtext">
             ${player.online ? 'Online' : 'Offline'} · ${hasRolled ? `Rolou às ${player.rolledAtStr ?? '—'}` : 'Aguardando...'}
@@ -558,11 +526,12 @@ function updateMyStatusBar() {
     val.className = 'my-status-value';
   }
 
-  const colors = colorFromString(state.nickname);
-  [document.getElementById('my-avatar-sm'), document.getElementById('header-avatar')].forEach((av) => {
-    if (!av) return;
-    av.textContent = initials(state.nickname);
-    av.style.background = `linear-gradient(135deg, ${colors[0]}, ${colors[1]})`;
+  const myAvatar = avatarVisual(state.nickname, state.avatarUrl);
+  [document.getElementById('my-avatar-sm'), document.getElementById('header-avatar')].forEach((el) => {
+    if (!el) return;
+    el.textContent = myAvatar.label;
+    el.className = el.id === 'my-avatar-sm' ? `${myAvatar.className} avatar-sm` : myAvatar.className;
+    el.setAttribute('style', myAvatar.styleExtra);
   });
 }
 
@@ -605,10 +574,29 @@ function confirmModifierModal() {
   if (!context) return;
 
   if (context.type === 'player_roll') {
-    executePlayerRoll(dynamicMod);
+    executePlayerRoll(dynamicMod, !!context.isReroll);
   } else if (context.type === 'enemy_roll') {
     executeEnemyRoll(context.enemyId, dynamicMod);
   }
+}
+
+// ──────────────────────────────────────────────────────────────
+//  MODAL: CONFIRMAÇÃO DE RE-ROLL
+// ──────────────────────────────────────────────────────────────
+function openRerollModal() {
+  document.getElementById('modal-reroll').classList.remove('hidden');
+}
+
+function closeRerollModal() {
+  document.getElementById('modal-reroll').classList.add('hidden');
+}
+
+function confirmReroll() {
+  closeRerollModal();
+  // Após confirmar o re-roll, segue o fluxo normal de rolagem
+  // (incluindo o modal de modificador situacional), apenas marcando
+  // o contexto como re-roll para que o resultado final saiba disso.
+  openModifierModal({ type: 'player_roll', isReroll: true });
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -616,21 +604,28 @@ function confirmModifierModal() {
 // ──────────────────────────────────────────────────────────────
 function rollDiceClicked() {
   if (!state.nickname) return;
-  if (state.hasRolled) {
-    showToast('Você já rolou nesta rodada. Aguarde a próxima rodada.', 'info');
-    return;
-  }
   // 🔒 TRAVA: impede que o usuário abra dois modais/disparos simultâneos
   // clicando rápido duas vezes (mini race condition local no cliente).
   if (rollInFlight) return;
-  openModifierModal({ type: 'player_roll' });
+
+  // 🔄 ALTERAÇÃO A: o bloqueio de nova rolagem foi removido. Se o
+  // jogador já rolou nesta rodada, pedimos confirmação explícita de
+  // re-roll em vez de simplesmente impedir a ação.
+  if (state.hasRolled) {
+    openRerollModal();
+    return;
+  }
+  openModifierModal({ type: 'player_roll', isReroll: false });
 }
 
-async function executePlayerRoll(dynamicMod) {
-  if (state.hasRolled || rollInFlight) return;
+async function executePlayerRoll(dynamicMod, isReroll = false) {
+  if (rollInFlight) return;
   rollInFlight = true;
 
   const btn = document.getElementById('btn-roll');
+  // 🔒 Trava apenas MOMENTÂNEA (evita duplo-clique durante o processamento
+  // desta rolagem) — não impede mais rolagens futuras, já que o re-roll
+  // agora é permitido. O botão é sempre reabilitado no `finally` abaixo.
   btn.disabled = true;
 
   try {
@@ -642,12 +637,11 @@ async function executePlayerRoll(dynamicMod) {
 
     state.hasRolled = true;
     state.myRoll = roll;
-    applyRollToPlayer(state.userId, { roll, staticMod, dynamicMod, total, rolledAt: timestamp, rolledAtStr: nowTime() });
+    applyRollToPlayer(state.userId, { roll, staticMod, dynamicMod, total, rolledAt: timestamp, rolledAtStr: nowTime(), isReroll });
 
-    playSoundRollFeedback(roll);
     renderPlayersGrid();
     animateCard(state.userId, roll);
-    announceRollLocally(state.nickname, roll, total);
+    announceRollLocally(state.nickname, roll, total, isReroll);
 
     await broadcastDiceRoll({
       userId: state.userId,
@@ -661,31 +655,31 @@ async function executePlayerRoll(dynamicMod) {
       total,
       rolledAt: timestamp,
       rolledAtStr: nowTime(),
+      isReroll,
     });
   } finally {
     rollInFlight = false;
+    btn.disabled = false; // 🔄 sempre reabilita: re-roll deve continuar disponível
   }
 }
 
-function playSoundRollFeedback(roll) {
-  if (roll === DICE_MAX) playSoundNat20();
-  else if (roll === 1) playSoundNat1();
-  else playSoundRoll();
-}
-
-function announceRollLocally(nickname, roll, total) {
+function announceRollLocally(nickname, roll, total, isReroll = false) {
   const safeName = sanitizeText(nickname) || 'Alguém';
+  // 🔄 ALTERAÇÃO A: prefixo obrigatório de re-roll, usado tanto no toast
+  // quanto no log de combate — nenhum dos dois pode omitir essa informação.
+  const rerollTag = isReroll ? '🔁 [RE-ROLL] ' : '';
   if (roll === DICE_MAX) {
-    showToast(`⚔️ ${safeName} tirou NAT 20! CRÍTICO!`, 'nat20', 5000);
+    showToast(`${rerollTag}⚔️ ${safeName} tirou NAT 20! CRÍTICO!`, 'nat20', 5000);
     showNatModal({ isNat20: true, playerNick: safeName, value: roll });
   } else if (roll === 1) {
-    showToast(`💀 ${safeName} falhou criticamente!`, 'error', 4000);
+    showToast(`${rerollTag}💀 ${safeName} falhou criticamente!`, 'error', 4000);
     showNatModal({ isNat20: false, playerNick: safeName, value: roll });
   } else {
-    showToast(`🎲 ${safeName} rolou ${roll} (total ${total})`, 'info', 2500);
+    showToast(`${rerollTag}🎲 ${safeName} rolou ${roll} (total ${total})`, 'info', 2500);
   }
-  const logType = roll === DICE_MAX ? 'nat20' : roll === 1 ? 'nat1' : 'default';
-  addLog(`${safeName} rolou ${roll}${roll !== total ? ` (total ${total})` : ''}${roll === DICE_MAX ? ' — CRÍTICO!' : roll === 1 ? ' — FALHA!' : ''}`, logType);
+  const logType = roll === DICE_MAX ? 'nat20' : roll === 1 ? 'nat1' : isReroll ? 'reroll' : 'default';
+  const rerollLogPrefix = isReroll ? '[RE-ROLL] ' : '';
+  addLog(`${rerollLogPrefix}${safeName} rolou ${roll}${roll !== total ? ` (total ${total})` : ''}${roll === DICE_MAX ? ' — CRÍTICO!' : roll === 1 ? ' — FALHA!' : ''}`, logType);
 }
 
 /**
@@ -709,6 +703,8 @@ function applyRollToPlayer(userId, payload) {
       total: null,
       rolledAt: null,
       rolledAtStr: null,
+      isReroll: false,
+      avatarUrl: typeof payload.avatarUrl === 'string' ? payload.avatarUrl : null,
     };
   }
   const p = state.players[userId];
@@ -718,7 +714,12 @@ function applyRollToPlayer(userId, payload) {
   p.total = safeInt(payload.total, p.roll + p.staticMod + p.dynamicMod, -999, 999);
   p.rolledAt = payload.rolledAt ?? Date.now();
   p.rolledAtStr = sanitizeText(payload.rolledAtStr) || nowTime();
+  p.isReroll = !!payload.isReroll;
   if (payload.hidden !== undefined) p.hidden = !!payload.hidden;
+  // Só sobrescreve avatarUrl se o payload trouxe explicitamente um valor
+  // (rolagens não recarregam a foto a cada vez; presence sync é quem
+  // mantém isso atualizado quando o jogador troca de foto no meio do jogo).
+  if (payload.avatarUrl !== undefined) p.avatarUrl = typeof payload.avatarUrl === 'string' ? payload.avatarUrl : null;
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -826,7 +827,6 @@ async function executeEnemyRoll(enemyId, dynamicMod) {
 
   renderPlayersGrid();
   animateCard(instanceId, roll);
-  playSoundRollFeedback(roll);
 
   const displayName = profile.hidden ? 'Inimigo Oculto' : profile.name;
   addLog(`${state.isGM ? 'GM' : 'Alguém'} rolou iniciativa para ${displayName}: ${roll} (total ${total})`, roll === DICE_MAX ? 'nat20' : roll === 1 ? 'nat1' : 'gm');
@@ -976,17 +976,22 @@ async function connectRealtime(room) {
     const safeName = sanitizeText(payload.hidden && !state.isGM ? 'Inimigo Oculto' : payload.nickname) || 'Alguém';
     const roll = state.players[payload.userId].roll;
     const total = state.players[payload.userId].total;
+    // 🔄 ALTERAÇÃO A: propaga a marcação de re-roll recebida de OUTRO
+    // cliente, garantindo que todos os jogadores na sala vejam a mesma
+    // informação no log, não só quem executou a ação.
+    const isReroll = !!payload.isReroll;
+    const rerollTag = isReroll ? '🔁 [RE-ROLL] ' : '';
 
-    playSoundRollFeedback(roll);
     if (roll === DICE_MAX) {
-      showToast(`⚔️ ${safeName} tirou NAT 20! CRÍTICO!`, 'nat20', 5000);
+      showToast(`${rerollTag}⚔️ ${safeName} tirou NAT 20! CRÍTICO!`, 'nat20', 5000);
       showNatModal({ isNat20: true, playerNick: safeName, value: roll });
     } else if (roll === 1) {
-      showToast(`💀 ${safeName} falhou criticamente!`, 'error', 4000);
+      showToast(`${rerollTag}💀 ${safeName} falhou criticamente!`, 'error', 4000);
     } else {
-      showToast(`🎲 ${safeName} rolou ${roll}`, 'info', 2000);
+      showToast(`${rerollTag}🎲 ${safeName} rolou ${roll}`, 'info', 2000);
     }
-    addLog(`${safeName} rolou ${roll}${roll !== total ? ` (total ${total})` : ''}${roll === DICE_MAX ? ' — CRÍTICO!' : roll === 1 ? ' — FALHA!' : ''}`, roll === DICE_MAX ? 'nat20' : roll === 1 ? 'nat1' : 'default');
+    const logType = roll === DICE_MAX ? 'nat20' : roll === 1 ? 'nat1' : isReroll ? 'reroll' : 'default';
+    addLog(`${isReroll ? '[RE-ROLL] ' : ''}${safeName} rolou ${roll}${roll !== total ? ` (total ${total})` : ''}${roll === DICE_MAX ? ' — CRÍTICO!' : roll === 1 ? ' — FALHA!' : ''}`, logType);
   });
 
   channel.on('broadcast', { event: 'next_round' }, ({ payload }) => {
@@ -1028,9 +1033,14 @@ async function connectRealtime(room) {
             total: null,
             rolledAt: null,
             rolledAtStr: null,
+            isReroll: false,
+            avatarUrl: typeof presence.avatarUrl === 'string' ? presence.avatarUrl : null,
           };
         } else {
           state.players[uid].online = true;
+          // 🖼️ Mantém a foto de perfil sincronizada mesmo se o jogador
+          // trocá-la DEPOIS de já estar na sala (re-track de presence).
+          state.players[uid].avatarUrl = typeof presence.avatarUrl === 'string' ? presence.avatarUrl : null;
         }
       });
     });
@@ -1062,12 +1072,173 @@ async function connectRealtime(room) {
 
   await channel.subscribe(async (status) => {
     if (status === 'SUBSCRIBED') {
-      await channel.track({ userId: state.userId, nickname: state.nickname, isGM: state.isGM, joinedAt: Date.now() });
-      addLog(`Conectado ao canal "${room}" via Supabase Realtime.`, 'gm');
+      await channel.track({ userId: state.userId, nickname: state.nickname, isGM: state.isGM, avatarUrl: state.avatarUrl, joinedAt: Date.now() });
+      addLog(`Conectado à sala "${room}".`, 'gm');
     } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-      showToast('❌ Erro no canal Realtime. Verifique suas credenciais Supabase.', 'error', 8000);
+      showToast('❌ Erro de conexão. Tente novamente em alguns instantes.', 'error', 8000);
     }
   });
+}
+
+// ──────────────────────────────────────────────────────────────
+//  FOTO DE PERFIL (UPLOAD VIA SUPABASE STORAGE)
+// ──────────────────────────────────────────────────────────────
+
+let pendingAvatarFile = null; // arquivo selecionado, aguardando confirmação de "Salvar Foto"
+
+function openAvatarModal() {
+  pendingAvatarFile = null;
+  document.getElementById('input-avatar-file').value = '';
+  document.getElementById('btn-avatar-save').disabled = true;
+  setAvatarUploadStatus('', null);
+
+  // Pré-popula o preview com a foto atual (se houver) ou as iniciais.
+  const av = avatarVisual(state.nickname, state.avatarUrl);
+  const preview = document.getElementById('avatar-preview');
+  preview.className = `avatar-circle avatar-preview${av.className.includes('has-photo') ? ' has-photo' : ''}`;
+  preview.setAttribute('style', av.styleExtra);
+  preview.textContent = av.label;
+
+  document.getElementById('modal-avatar').classList.remove('hidden');
+}
+
+function closeAvatarModal() {
+  document.getElementById('modal-avatar').classList.add('hidden');
+  pendingAvatarFile = null;
+}
+
+function setAvatarUploadStatus(msg, kind) {
+  const el = document.getElementById('avatar-upload-status');
+  if (!el) return;
+  el.textContent = msg;
+  el.classList.remove('is-error', 'is-success');
+  if (kind === 'error') el.classList.add('is-error');
+  if (kind === 'success') el.classList.add('is-success');
+}
+
+/**
+ * 🔒 VALIDAÇÃO DE ARQUIVO (Bug B): antes de sequer tentar o upload,
+ * validamos tipo MIME e tamanho. A causa mais comum de "erro ao
+ * atualizar a foto de perfil" é tentar subir um arquivo grande demais
+ * ou de um tipo não aceito pela política do bucket — validar aqui dá
+ * uma mensagem clara em vez de um erro genérico de rede.
+ */
+function validateAvatarFile(file) {
+  if (!file) return 'Nenhum arquivo selecionado.';
+  if (!AVATAR_ALLOWED_TYPES.includes(file.type)) {
+    return 'Formato não suportado. Use PNG, JPG ou WEBP.';
+  }
+  if (file.size > AVATAR_MAX_BYTES) {
+    return `Arquivo muito grande (máx. ${(AVATAR_MAX_BYTES / (1024 * 1024)).toFixed(0)}MB).`;
+  }
+  return null; // válido
+}
+
+function handleAvatarFileSelected(file) {
+  const error = validateAvatarFile(file);
+  if (error) {
+    setAvatarUploadStatus(`⚠️ ${error}`, 'error');
+    document.getElementById('btn-avatar-save').disabled = true;
+    pendingAvatarFile = null;
+    return;
+  }
+
+  pendingAvatarFile = file;
+  setAvatarUploadStatus('Pronto para enviar.', null);
+  document.getElementById('btn-avatar-save').disabled = false;
+
+  // Preview local instantâneo via blob URL — não depende do upload
+  // ter terminado para o jogador já ver como a foto vai ficar.
+  const blobUrl = URL.createObjectURL(file);
+  const preview = document.getElementById('avatar-preview');
+  preview.className = 'avatar-circle avatar-preview has-photo';
+  preview.style.backgroundImage = `url('${blobUrl}')`;
+  preview.textContent = '';
+}
+
+/**
+ * Envia o arquivo para o bucket público de avatares no Supabase Storage
+ * e retorna a URL pública resultante.
+ * 🔒 TRAVA: nome de arquivo gerado com genUniqueId (nunca usa o nome
+ * original do arquivo do usuário) — evita colisão entre jogadores e
+ * also evita problemas de caracteres especiais/path traversal no nome.
+ */
+async function uploadAvatarToStorage(file) {
+  if (!supabaseClient) {
+    throw new Error('Sem conexão configurada — não é possível enviar a foto agora.');
+  }
+  const ext = (file.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
+  const path = `${state.userId}/${genUniqueId('avatar')}.${ext}`;
+
+  const { error: uploadError } = await supabaseClient.storage
+    .from(AVATAR_BUCKET)
+    .upload(path, file, { cacheControl: '3600', upsert: false, contentType: file.type });
+
+  if (uploadError) {
+    // Mensagens mais claras para as causas mais comuns de falha.
+    const msg = uploadError.message || '';
+    if (msg.includes('Bucket not found')) {
+      throw new Error('Bucket de avatares não configurado no Supabase (veja SETUP.md).');
+    }
+    if (msg.includes('row-level security') || msg.includes('policy')) {
+      throw new Error('Permissão negada pelo Storage (verifique as políticas do bucket no SETUP.md).');
+    }
+    throw new Error(msg || 'Falha desconhecida ao enviar a imagem.');
+  }
+
+  const { data: publicData } = supabaseClient.storage.from(AVATAR_BUCKET).getPublicUrl(path);
+  if (!publicData?.publicUrl) {
+    throw new Error('Upload concluído, mas não foi possível obter a URL pública.');
+  }
+  return publicData.publicUrl;
+}
+
+async function saveAvatar() {
+  if (!pendingAvatarFile) return;
+  const btn = document.getElementById('btn-avatar-save');
+  btn.disabled = true;
+  setAvatarUploadStatus('Enviando imagem...', null);
+
+  try {
+    const publicUrl = await uploadAvatarToStorage(pendingAvatarFile);
+    state.avatarUrl = publicUrl;
+
+    // Atualiza o próprio registro localmente de forma imediata...
+    if (state.players[state.userId]) state.players[state.userId].avatarUrl = publicUrl;
+    updateMyStatusBar();
+    renderPlayersGrid();
+
+    // ...e re-transmite a presença para que os outros jogadores
+    // recebam a nova foto sem precisar recarregar a página.
+    if (channel) {
+      await channel.track({ userId: state.userId, nickname: state.nickname, isGM: state.isGM, avatarUrl: state.avatarUrl, joinedAt: Date.now() });
+    }
+
+    setAvatarUploadStatus('✓ Foto atualizada!', 'success');
+    showToast('🖼️ Foto de perfil atualizada!', 'success', 2500);
+    setTimeout(closeAvatarModal, 700);
+  } catch (err) {
+    console.error('Falha no upload de avatar:', err);
+    // 🔒 CORREÇÃO BUG B: em vez de uma falha silenciosa ou um erro
+    // genérico, mostramos o motivo específico (formato, tamanho,
+    // bucket ausente, política de acesso) tanto no modal quanto em
+    // um toast, e MANTEMOS o modal aberto para o jogador tentar de novo.
+    setAvatarUploadStatus(`⚠️ ${err.message}`, 'error');
+    showToast(`❌ Não foi possível atualizar a foto: ${err.message}`, 'error', 6000);
+    btn.disabled = false;
+  }
+}
+
+async function removeAvatar() {
+  state.avatarUrl = null;
+  if (state.players[state.userId]) state.players[state.userId].avatarUrl = null;
+  updateMyStatusBar();
+  renderPlayersGrid();
+  if (channel) {
+    await channel.track({ userId: state.userId, nickname: state.nickname, isGM: state.isGM, avatarUrl: null, joinedAt: Date.now() });
+  }
+  showToast('Foto removida — usando iniciais.', 'info', 2000);
+  closeAvatarModal();
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -1117,6 +1288,8 @@ async function enterRoom(nickname, room, isGM) {
     total: null,
     rolledAt: null,
     rolledAtStr: null,
+    isReroll: false,
+    avatarUrl: state.avatarUrl,
   };
 
   showGameScreen();
@@ -1124,9 +1297,9 @@ async function enterRoom(nickname, room, isGM) {
   try {
     await connectRealtime(safeRoom);
   } catch (err) {
-    console.error('Supabase error:', err);
-    showToast('⚠️ Modo offline: Supabase não configurado ou indisponível.', 'error', 6000);
-    addLog('Modo local ativo (Supabase não configurado).', 'gm');
+    console.error('Falha na conexão em tempo real:', err);
+    showToast('⚠️ Modo offline: sincronização indisponível.', 'error', 6000);
+    addLog('Modo local ativo (sincronização indisponível).', 'gm');
   }
 
   addLog(`Você entrou na sala "${safeRoom}" como ${state.isGM ? 'Mestre' : 'Jogador'}.`, 'join');
@@ -1143,11 +1316,25 @@ async function leaveRoom() {
     }
     channel = null;
   }
+  // 🔒 CORREÇÃO BUG A: reset COMPLETO do estado de sessão/identidade.
+  // Antes, apenas players/enemies eram limpos — nickname, room, isGM e
+  // userId permaneciam "vazando" do login anterior. Isso fazia com que,
+  // ao deslogar e entrar de novo SEM dar refresh na página, o estado de
+  // GM (e outros dados pessoais) continuasse vivo em memória mesmo após
+  // o usuário desmarcar a checkbox de GM na tela de login.
+  state.nickname = '';
+  state.room = '';
+  state.isGM = false;
+  state.userId = '';
+  state.round = 1;
   state.players = {};
   state.enemies = {};
   state.myRoll = null;
   state.hasRolled = false;
+  state.avatarUrl = null;
+  state.pendingModifierContext = null;
   logLines.length = 0;
+  resetGmUI(); // 🔒 esconde explicitamente os botões de GM antes de voltar ao login
   showLoginScreen();
 }
 
@@ -1161,14 +1348,37 @@ function showGameScreen() {
   document.getElementById('header-room').textContent = `#${state.room}`;
   document.getElementById('sidebar-room').textContent = state.room;
 
+  // 🔒 CORREÇÃO BUG A: antes, os botões de GM só eram MOSTRADOS quando
+  // isGM=true, e nunca explicitamente ESCONDIDOS quando isGM=false. Como
+  // o DOM persiste entre logins sem refresh de página, um usuário que
+  // entrava como GM e depois entrava de novo como jogador comum ainda
+  // via os botões (eles nunca tinham sido re-ocultados). Agora ambos os
+  // ramos (true/false) são tratados explicitamente em toda entrada de sala.
   if (state.isGM) {
     document.getElementById('btn-next-round').classList.remove('hidden');
     document.getElementById('btn-clear-rolls').classList.remove('hidden');
     document.getElementById('btn-gm-panel').classList.remove('hidden');
+  } else {
+    document.getElementById('btn-next-round').classList.add('hidden');
+    document.getElementById('btn-clear-rolls').classList.add('hidden');
+    document.getElementById('btn-gm-panel').classList.add('hidden');
   }
 
   document.getElementById('fab-log').classList.remove('hidden');
   updateMyStatusBar();
+}
+
+/**
+ * Garante que toda a UI exclusiva de GM volte ao estado escondido.
+ * Chamada ao deslogar, antes mesmo de qualquer novo login acontecer —
+ * assim o DOM nunca fica "no limbo" mostrando controles de GM para
+ * quem não tem mais essa permissão na sessão atual.
+ */
+function resetGmUI() {
+  document.getElementById('btn-next-round')?.classList.add('hidden');
+  document.getElementById('btn-clear-rolls')?.classList.add('hidden');
+  document.getElementById('btn-gm-panel')?.classList.add('hidden');
+  document.getElementById('modal-gm')?.classList.add('hidden');
 }
 
 function showLoginScreen() {
@@ -1177,18 +1387,22 @@ function showLoginScreen() {
 }
 
 // ──────────────────────────────────────────────────────────────
-//  VERIFICAÇÃO DA CONFIGURAÇÃO SUPABASE (TELA DE LOGIN)
+//  VERIFICAÇÃO DA CONEXÃO EM TEMPO REAL (TELA DE LOGIN)
+//  🔒 ALTERAÇÃO C: o texto exibido ao jogador nunca cita o nome do
+//  provedor (Supabase) — apenas indica se o multiplayer está ativo
+//  ou em modo local. A integração em si continua normalmente nos
+//  bastidores (ver connectRealtime).
 // ──────────────────────────────────────────────────────────────
-function checkSupabaseConfig() {
-  const el = document.getElementById('supabase-status');
+function checkRealtimeConfig() {
+  const el = document.getElementById('connection-status');
   if (!el) return;
   const configured =
     SUPABASE_URL && !SUPABASE_URL.includes('COLE_AQUI') && SUPABASE_ANON_KEY && !SUPABASE_ANON_KEY.includes('COLE_AQUI');
 
   el.innerHTML = configured
-    ? '<span class="text-muted" style="color:var(--color-success);">✓ Supabase configurado — Multiplayer ativo</span>'
+    ? '<span class="text-muted" style="color:var(--color-success);">✓ Conexão pronta — Multiplayer ativo</span>'
     : `<span class="text-muted" style="color:var(--color-ember-light);">
-         ⚠️ Supabase não configurado — Modo local (1 jogador)<br>
+         ⚠️ Multiplayer indisponível — Modo local (1 jogador)<br>
          <span style="font-size:0.68rem;">Veja o arquivo SETUP.md para configurar</span>
        </span>`;
 }
@@ -1197,7 +1411,7 @@ function checkSupabaseConfig() {
 //  INICIALIZAÇÃO — EVENT LISTENERS
 // ──────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
-  checkSupabaseConfig();
+  checkRealtimeConfig();
 
   // Preenche campos a partir do localStorage (conveniência, não dados sensíveis)
   const savedNick = localStorage.getItem(LS_NICKNAME) ?? '';
@@ -1227,6 +1441,25 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   document.getElementById('modal-modifier').addEventListener('click', (e) => {
     if (e.target.id === 'modal-modifier') closeModifierModal();
+  });
+
+  // ── Modal de confirmação de re-roll ──
+  document.getElementById('btn-reroll-cancel').addEventListener('click', closeRerollModal);
+  document.getElementById('btn-reroll-confirm').addEventListener('click', confirmReroll);
+  document.getElementById('modal-reroll').addEventListener('click', (e) => {
+    if (e.target.id === 'modal-reroll') closeRerollModal();
+  });
+
+  // ── Modal de foto de perfil (avatar) ──
+  document.getElementById('btn-change-avatar').addEventListener('click', openAvatarModal);
+  document.getElementById('btn-avatar-cancel').addEventListener('click', closeAvatarModal);
+  document.getElementById('btn-avatar-save').addEventListener('click', saveAvatar);
+  document.getElementById('btn-avatar-remove').addEventListener('click', removeAvatar);
+  document.getElementById('input-avatar-file').addEventListener('change', (e) => {
+    handleAvatarFileSelected(e.target.files?.[0] ?? null);
+  });
+  document.getElementById('modal-avatar').addEventListener('click', (e) => {
+    if (e.target.id === 'modal-avatar') closeAvatarModal();
   });
 
   // ── Botões do GM: rodada e limpeza ──
@@ -1294,7 +1527,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const gameVisible = !document.getElementById('screen-game').classList.contains('hidden');
     const modalsOpen = !document.getElementById('modal-modifier').classList.contains('hidden')
       || !document.getElementById('modal-gm').classList.contains('hidden')
-      || !document.getElementById('modal-nat').classList.contains('hidden');
+      || !document.getElementById('modal-nat').classList.contains('hidden')
+      || !document.getElementById('modal-reroll').classList.contains('hidden')
+      || !document.getElementById('modal-avatar').classList.contains('hidden');
     if (e.code === 'Space' && gameVisible && !modalsOpen && !e.target.matches('input,textarea,button')) {
       e.preventDefault();
       rollDiceClicked();
