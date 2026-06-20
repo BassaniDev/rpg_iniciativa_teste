@@ -40,6 +40,12 @@ const LS_LAST_MODIFIER = 'rpg_initiative_last_modifier'; // 🔄 persistência d
 let supabaseClient = null;
 let channel = null;
 
+// 🔧 CORREÇÃO "Background Disconnect": rastreiam o estado da conexã o
+// Realtime para a lógica de reconexão via Visibility API.
+let isRealtimeConnected = false;
+let currentRoomName = null; // nome da sala atual, necessário para reconectar
+let reconnectInFlight = false; // evita reconexões simultâneas duplicadas
+
 // Trava simples para impedir múltiplos cliques/rolagens simultâneas
 // do MESMO cliente antes do broadcast anterior terminar de enviar.
 // (Race condition local: clique duplo no botão Rolar.)
@@ -456,9 +462,9 @@ function buildPlayerCard(player, rank) {
         <div>
           ${
             hasRolled
-              ? `<div class="dice-value ${rClass}">${player.total}</div>
+              ? `<div class="dice-value ${rClass}${state.isGM ? ' gm-editable' : ''}" ${state.isGM ? `data-action="edit-initiative" data-id="${player.id}" title="Clique para editar a iniciativa (GM)"` : ''}>${player.total}</div>
                  <div class="roll-caption ${rClass === 'nat20' ? 'crit' : rClass === 'nat1' ? 'fail' : ''}">
-                   ${rClass === 'nat20' ? '⚔️ CRÍTICO NATURAL!' : rClass === 'nat1' ? '💀 FALHA CRÍTICA!' : 'Total de Iniciativa'}
+                   ${player.manualOverride ? '✏️ Editado pelo Mestre' : rClass === 'nat20' ? '⚔️ CRÍTICO NATURAL!' : rClass === 'nat1' ? '💀 FALHA CRÍTICA!' : 'Total de Iniciativa'}
                  </div>`
               : `<div class="dice-value empty">—</div><div class="roll-caption">Não rolou</div>`
           }
@@ -693,7 +699,7 @@ async function executePlayerRoll(dynamicMod, isReroll = false) {
 
     renderPlayersGrid();
     animateCard(state.userId, roll);
-    announceRollLocally(state.nickname, roll, total, isReroll);
+    announceRollLocally(state.nickname, roll, staticMod, dynamicMod, total, isReroll);
 
     await broadcastDiceRoll({
       userId: state.userId,
@@ -732,11 +738,26 @@ async function executePlayerRoll(dynamicMod, isReroll = false) {
   }
 }
 
-function announceRollLocally(nickname, roll, total, isReroll = false) {
+/**
+ * 🔄 ITEM 2 (melhoria no log): formata o detalhamento de uma rolagem
+ * incluindo o bônus situacional/estático quando presente, no formato
+ * "D20: 18 (+3) = 21". Sem nenhum modificador, simplifica para apenas
+ * "D20: 18" (já que aí o roll e o total são o mesmo número, repetir
+ * seria redundante e poluiria o log).
+ */
+function formatRollBreakdown(roll, staticMod, dynamicMod, total) {
+  const totalMod = (staticMod ?? 0) + (dynamicMod ?? 0);
+  if (totalMod === 0) return `D20: ${roll}`;
+  const sign = totalMod > 0 ? '+' : ''; // números negativos já trazem o "-" embutido
+  return `D20: ${roll} (${sign}${totalMod}) = ${total}`;
+}
+
+function announceRollLocally(nickname, roll, staticMod, dynamicMod, total, isReroll = false) {
   const safeName = sanitizeText(nickname) || 'Alguém';
   // 🔄 ALTERAÇÃO A: prefixo obrigatório de re-roll, usado tanto no toast
   // quanto no log de combate — nenhum dos dois pode omitir essa informação.
   const rerollTag = isReroll ? '🔁 [RE-ROLL] ' : '';
+  const breakdown = formatRollBreakdown(roll, staticMod, dynamicMod, total);
   if (roll === DICE_MAX) {
     showToast(`${rerollTag}⚔️ ${safeName} tirou NAT 20! CRÍTICO!`, 'nat20', 5000);
     showNatModal({ isNat20: true, playerNick: safeName, value: roll });
@@ -744,11 +765,11 @@ function announceRollLocally(nickname, roll, total, isReroll = false) {
     showToast(`${rerollTag}💀 ${safeName} falhou criticamente!`, 'error', 4000);
     showNatModal({ isNat20: false, playerNick: safeName, value: roll });
   } else {
-    showToast(`${rerollTag}🎲 ${safeName} rolou ${roll} (total ${total})`, 'info', 2500);
+    showToast(`${rerollTag}🎲 ${safeName} rolou ${breakdown}`, 'info', 2500);
   }
   const logType = roll === DICE_MAX ? 'nat20' : roll === 1 ? 'nat1' : isReroll ? 'reroll' : 'default';
   const rerollLogPrefix = isReroll ? '[RE-ROLL] ' : '';
-  addLog(`${rerollLogPrefix}${safeName} rolou ${roll}${roll !== total ? ` (total ${total})` : ''}${roll === DICE_MAX ? ' — CRÍTICO!' : roll === 1 ? ' — FALHA!' : ''}`, logType);
+  addLog(`${rerollLogPrefix}${safeName} rolou ${breakdown}${roll === DICE_MAX ? ' — CRÍTICO!' : roll === 1 ? ' — FALHA!' : ''}`, logType);
 }
 
 /**
@@ -774,6 +795,7 @@ function applyRollToPlayer(userId, payload) {
       rolledAtStr: null,
       isReroll: false,
       avatarUrl: typeof payload.avatarUrl === 'string' ? payload.avatarUrl : null,
+      manualOverride: false, // 🆕 true quando o GM editou o total manualmente
     };
   }
   const p = state.players[userId];
@@ -784,6 +806,10 @@ function applyRollToPlayer(userId, payload) {
   p.rolledAt = payload.rolledAt ?? Date.now();
   p.rolledAtStr = sanitizeText(payload.rolledAtStr) || nowTime();
   p.isReroll = !!payload.isReroll;
+  // 🆕 Uma rolagem de dado "de verdade" (manual ou via re-roll) sempre
+  // limpa qualquer edição manual anterior do GM — o novo resultado é
+  // legítimo e não deve continuar marcado como "editado pelo Mestre".
+  p.manualOverride = false;
   if (payload.hidden !== undefined) p.hidden = !!payload.hidden;
   // Só sobrescreve avatarUrl se o payload trouxe explicitamente um valor
   // (rolagens não recarregam a foto a cada vez; presence sync é quem
@@ -923,7 +949,8 @@ async function executeEnemyRoll(enemyId, dynamicMod) {
   animateCard(instanceId, roll);
 
   const displayName = profile.hidden ? 'Inimigo Oculto' : profile.name;
-  addLog(`${state.isGM ? 'GM' : 'Alguém'} rolou iniciativa para ${displayName}: ${roll} (total ${total})`, roll === DICE_MAX ? 'nat20' : roll === 1 ? 'nat1' : 'gm');
+  const breakdown = formatRollBreakdown(roll, profile.staticMod, dynamicMod, total);
+  addLog(`${state.isGM ? 'GM' : 'Alguém'} rolou iniciativa para ${displayName}: ${breakdown}`, roll === DICE_MAX ? 'nat20' : roll === 1 ? 'nat1' : 'gm');
 
   await broadcastDiceRoll({
     userId: instanceId,
@@ -997,6 +1024,135 @@ function resetRollButtonUI() {
   document.getElementById('btn-roll-text').textContent = 'ROLAR D20';
 }
 
+/**
+ * 🆕 NOVA FUNCIONALIDADE: revela todos os inimigos em Modo Furtivo,
+ * tanto os perfis reutilizáveis (state.enemies — afeta futuras
+ * rolagens) quanto as instâncias já presentes na lista de iniciativa
+ * (state.players — afeta o que está visível AGORA para os jogadores).
+ * 🔒 Mantém o nome real do inimigo intacto durante toda a operação —
+ * só alteramos a flag `hidden`, então nada precisa ser "descoberto"
+ * ou recriado, apenas a visibilidade muda.
+ */
+function applyRevealEnemies() {
+  let revealedCount = 0;
+
+  Object.values(state.enemies).forEach((enemy) => {
+    if (enemy.hidden) {
+      enemy.hidden = false;
+      revealedCount++;
+    }
+  });
+
+  Object.values(state.players).forEach((player) => {
+    if (player.isEnemy && player.hidden) {
+      player.hidden = false;
+    }
+  });
+
+  renderEnemyList();
+  renderPlayersGrid();
+  addLog('GM revelou todos os inimigos ocultos.', 'gm');
+  showToast(
+    revealedCount > 0 || Object.values(state.players).some((p) => p.isEnemy)
+      ? '👁️ Inimigos ocultos revelados!'
+      : 'Nenhum inimigo estava oculto.',
+    'info'
+  );
+}
+
+async function broadcastRevealEnemies() {
+  if (!state.isGM) return;
+  applyRevealEnemies();
+  if (!channel) return;
+  // 🔄 Sincroniza em tempo real: envia o ID + nome real de cada
+  // instância de inimigo revelada, para que os clientes dos jogadores
+  // (que não têm os perfis do GM em seu state.enemies) consigam
+  // atualizar tanto a flag hidden quanto exibir o nome correto.
+  const revealedInstances = Object.values(state.players)
+    .filter((p) => p.isEnemy)
+    .map((p) => ({ userId: p.id, nickname: p.nickname }));
+  await channel.send({ type: 'broadcast', event: 'reveal_enemies', payload: { gmId: state.userId, revealedInstances } });
+}
+
+// ──────────────────────────────────────────────────────────────
+//  EDIÇÃO MANUAL DE INICIATIVA (GM)
+// ──────────────────────────────────────────────────────────────
+
+let editingInitiativeUserId = null; // guarda qual card está sendo editado entre abrir e confirmar
+
+function openEditInitiativeModal(userId) {
+  const player = state.players[userId];
+  if (!player || player.total === null) return; // 🔒 só edita quem já rolou
+  editingInitiativeUserId = userId;
+
+  const displayName = resolveDisplayName(player);
+  document.getElementById('edit-initiative-subtext').textContent = `Defina o valor de iniciativa de ${displayName} para a rodada atual.`;
+  const input = document.getElementById('input-edit-initiative');
+  input.value = player.total;
+  document.getElementById('modal-edit-initiative').classList.remove('hidden');
+  setTimeout(() => {
+    input.focus();
+    input.select();
+  }, 50);
+}
+
+function closeEditInitiativeModal() {
+  document.getElementById('modal-edit-initiative').classList.add('hidden');
+  editingInitiativeUserId = null;
+}
+
+async function confirmEditInitiative() {
+  const userId = editingInitiativeUserId;
+  const raw = document.getElementById('input-edit-initiative').value;
+  closeEditInitiativeModal();
+  if (!userId || !state.players[userId]) return;
+
+  // 🔒 TRAVA: campo vazio/inválido cancela a edição em vez de zerar a
+  // iniciativa de alguém por acidente (diferente do modificador de
+  // rolagem, aqui não existe um "valor neutro" razoável para usar).
+  const trimmed = sanitizeText(raw, 10);
+  if (trimmed === '') {
+    showToast('Edição cancelada: nenhum valor informado.', 'info', 2500);
+    return;
+  }
+  const newTotal = safeInt(raw, null, -999, 999);
+  if (newTotal === null) {
+    showToast('⚠️ Valor inválido — a iniciativa não foi alterada.', 'error');
+    return;
+  }
+
+  applyManualInitiativeEdit(userId, newTotal);
+
+  if (channel) {
+    await channel.send({
+      type: 'broadcast',
+      event: 'edit_initiative',
+      payload: { userId, total: newTotal, gmId: state.userId },
+    });
+  }
+}
+
+/**
+ * 🆕 NOVA FUNCIONALIDADE: aplica a sobrescrita manual do GM no total
+ * de iniciativa de um participante (jogador ou inimigo).
+ * 🔒 Mantemos roll/staticMod/dynamicMod como estavam — não fazemos
+ * "engenharia reversa" do número editado para esses componentes, já
+ * que o GM pode estar definindo um valor arbitrário sem relação com
+ * um d20 específico (ex: "todos os esqueletos agem na contagem 10").
+ * A flag manualOverride é o que avisa a UI para não exibir mais o
+ * detalhamento de CRÍTICO/FALHA, que deixaria de fazer sentido.
+ */
+function applyManualInitiativeEdit(userId, newTotal) {
+  const p = state.players[userId];
+  if (!p) return;
+  const displayName = resolveDisplayName(p);
+  p.total = newTotal;
+  p.manualOverride = true;
+  renderPlayersGrid();
+  addLog(`GM ajustou manualmente a iniciativa de ${displayName} para ${newTotal}.`, 'gm');
+  showToast(`✏️ Iniciativa de ${displayName} ajustada para ${newTotal}.`, 'info', 2500);
+}
+
 async function broadcastNextRound() {
   if (!state.isGM) return;
   const newRound = state.round + 1;
@@ -1050,6 +1206,7 @@ async function connectRealtime(room) {
     throw new Error('Biblioteca Supabase não carregada (verifique sua conexão de rede)');
   }
 
+  currentRoomName = room; // mantido também aqui por segurança (reconexão chama connectRealtime diretamente)
   supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
   // Canal único por sala — broadcast + presence isolados por nome de sala.
@@ -1068,13 +1225,17 @@ async function connectRealtime(room) {
     animateCard(payload.userId, state.players[payload.userId].roll);
 
     const safeName = sanitizeText(payload.hidden && !state.isGM ? 'Inimigo Oculto' : payload.nickname) || 'Alguém';
-    const roll = state.players[payload.userId].roll;
-    const total = state.players[payload.userId].total;
+    const p = state.players[payload.userId];
+    const roll = p.roll;
+    const total = p.total;
     // 🔄 ALTERAÇÃO A: propaga a marcação de re-roll recebida de OUTRO
     // cliente, garantindo que todos os jogadores na sala vejam a mesma
     // informação no log, não só quem executou a ação.
     const isReroll = !!payload.isReroll;
     const rerollTag = isReroll ? '🔁 [RE-ROLL] ' : '';
+    // 🔄 ITEM 2: mesmo detalhamento "D20: X (+Y) = Z" usado no log local,
+    // agora também para rolagens recebidas de outros jogadores/inimigos.
+    const breakdown = formatRollBreakdown(roll, p.staticMod, p.dynamicMod, total);
 
     if (roll === DICE_MAX) {
       showToast(`${rerollTag}⚔️ ${safeName} tirou NAT 20! CRÍTICO!`, 'nat20', 5000);
@@ -1082,15 +1243,41 @@ async function connectRealtime(room) {
     } else if (roll === 1) {
       showToast(`${rerollTag}💀 ${safeName} falhou criticamente!`, 'error', 4000);
     } else {
-      showToast(`${rerollTag}🎲 ${safeName} rolou ${roll}`, 'info', 2000);
+      showToast(`${rerollTag}🎲 ${safeName} rolou ${breakdown}`, 'info', 2000);
     }
     const logType = roll === DICE_MAX ? 'nat20' : roll === 1 ? 'nat1' : isReroll ? 'reroll' : 'default';
-    addLog(`${isReroll ? '[RE-ROLL] ' : ''}${safeName} rolou ${roll}${roll !== total ? ` (total ${total})` : ''}${roll === DICE_MAX ? ' — CRÍTICO!' : roll === 1 ? ' — FALHA!' : ''}`, logType);
+    addLog(`${isReroll ? '[RE-ROLL] ' : ''}${safeName} rolou ${breakdown}${roll === DICE_MAX ? ' — CRÍTICO!' : roll === 1 ? ' — FALHA!' : ''}`, logType);
   });
 
   channel.on('broadcast', { event: 'next_round' }, ({ payload }) => {
     if (state.isGM) return; // o GM já aplicou localmente antes de transmitir
     applyNextRound(payload?.round);
+  });
+
+  channel.on('broadcast', { event: 'reveal_enemies' }, ({ payload }) => {
+    if (state.isGM) return; // o GM já aplicou localmente antes de transmitir
+    // 🔒 TRAVA: ignora payload malformado (sem array de instâncias).
+    const instances = Array.isArray(payload?.revealedInstances) ? payload.revealedInstances : [];
+    instances.forEach(({ userId, nickname }) => {
+      if (!userId || !state.players[userId]) return;
+      state.players[userId].hidden = false;
+      // Atualiza também o nome, já que o jogador via apenas "Inimigo
+      // Oculto" até agora e nunca recebeu o nome real deste inimigo.
+      if (nickname) state.players[userId].nickname = sanitizeText(nickname) || state.players[userId].nickname;
+    });
+    renderPlayersGrid();
+    addLog('O Mestre revelou os inimigos ocultos!', 'gm');
+    showToast('👁️ Os inimigos ocultos foram revelados!', 'info', 3000);
+  });
+
+  channel.on('broadcast', { event: 'edit_initiative' }, ({ payload }) => {
+    if (state.isGM) return; // o GM já aplicou localmente antes de transmitir
+    // 🔒 TRAVA: ignora payload malformado ou referência a jogador que
+    // este cliente não conhece (ex: chegou fora de ordem).
+    const userId = payload?.userId;
+    const newTotal = safeInt(payload?.total, null, -999, 999);
+    if (!userId || !state.players[userId] || newTotal === null) return;
+    applyManualInitiativeEdit(userId, newTotal);
   });
 
   channel.on('broadcast', { event: 'clear_rolls' }, () => {
@@ -1130,6 +1317,7 @@ async function connectRealtime(room) {
             rolledAt: null,
             rolledAtStr: null,
             isReroll: false,
+            manualOverride: false,
             avatarUrl: typeof presence.avatarUrl === 'string' ? presence.avatarUrl : null,
           };
         } else {
@@ -1188,11 +1376,94 @@ async function connectRealtime(room) {
 
   await channel.subscribe(async (status) => {
     if (status === 'SUBSCRIBED') {
+      isRealtimeConnected = true;
       await channel.track({ userId: state.userId, nickname: state.nickname, isGM: state.isGM, avatarUrl: state.avatarUrl, lastRoll: getMyLastRollPayload(), joinedAt: Date.now() });
       addLog(`Conectado à sala "${room}".`, 'gm');
     } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+      isRealtimeConnected = false;
       showToast('❌ Erro de conexão. Tente novamente em alguns instantes.', 'error', 8000);
+    } else if (status === 'CLOSED') {
+      // 🔧 CORREÇÃO "Background Disconnect": navegadores mobile costumam
+      // fechar conexões WebSocket quando a aba vai para segundo plano
+      // (minimizar, trocar de app). Isso chega aqui como CLOSED — não
+      // tentamos reconectar imediatamente neste callback (a aba pode
+      // estar em background agora mesmo, e reconectar nesse momento é
+      // inútil); só marcamos o estado como desconectado. A reconexão de
+      // fato é disparada pelo listener de visibilitychange, quando a
+      // aba volta a ficar visível — ver setupVisibilityReconnect().
+      isRealtimeConnected = false;
     }
+  });
+}
+
+// ──────────────────────────────────────────────────────────────
+//  RECONEXÃO AUTOMÁTICA (BACKGROUND DISCONNECT FIX)
+//  Navegadores mobile suspendem ou fecham conexões WebSocket quando a
+//  aba vai para segundo plano (usuário minimiza, troca de app, ou o
+//  sistema operacional pausa a aba para economizar bateria). Ao voltar,
+//  o canal Realtime antigo pode estar morto sem que nenhum evento
+//  visível tenha disparado ainda. A Visibility API nos avisa exatamente
+//  quando a aba volta a ficar visível, e é o gatilho ideal para
+//  verificar a conexão e reconectar se necessário.
+// ──────────────────────────────────────────────────────────────
+
+async function reconnectRealtimeChannel() {
+  // 🔒 TRAVA: evita reconexões simultâneas (ex: o evento de visibilidade
+  // disparando mais de uma vez rapidamente, ou o usuário alternando de
+  // app repetidamente antes da primeira reconexão terminar).
+  if (reconnectInFlight) return;
+  if (!currentRoomName || !state.userId) return; // não está numa sala — nada a reconectar
+  if (isRealtimeConnected && channel) return; // já conectado, nada a fazer
+
+  reconnectInFlight = true;
+  showToast('🔄 Reconectando...', 'info', 2500);
+
+  try {
+    // Descarta o canal antigo (provavelmente já morto) antes de criar um
+    // novo — unsubscribe pode falhar se o canal já estiver fechado pelo
+    // navegador, então isso é só uma tentativa de limpeza, não crítica.
+    if (channel) {
+      try {
+        await channel.unsubscribe();
+      } catch (err) {
+        console.error('Falha ao limpar canal antigo (esperado se já estava morto):', err);
+      }
+      channel = null;
+    }
+
+    // 🔧 Reaproveita exatamente a mesma lógica de conexão inicial — ao
+    // reconectar, o handler de presence.sync (já implementado para o
+    // bug de late-join) automaticamente repovoa o estado de todos os
+    // jogadores e suas últimas rolagens a partir do presenceState atual,
+    // então não precisamos duplicar nenhuma lógica de sincronização aqui.
+    await connectRealtime(currentRoomName);
+    showToast('✓ Reconectado!', 'success', 2000);
+    addLog('Conexão restabelecida após retornar à aba.', 'gm');
+  } catch (err) {
+    console.error('Falha ao reconectar:', err);
+    showToast('⚠️ Não foi possível reconectar automaticamente. Recarregue a página se o problema persistir.', 'error', 6000);
+  } finally {
+    reconnectInFlight = false;
+  }
+}
+
+function setupVisibilityReconnect() {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      // Pequeno delay: dá tempo do navegador finalizar a transição de
+      // volta ao foreground antes de checar/abrir conexões de rede —
+      // evita disparar a reconexão num estado transitório do sistema.
+      setTimeout(reconnectRealtimeChannel, 150);
+    }
+  });
+
+  // 🔧 Em iOS Safari especificamente, voltar de outro app às vezes
+  // dispara 'pageshow' (com persisted=true, indicando retorno do cache
+  // de navegação) sem necessariamente passar por visibilitychange da
+  // mesma forma — adicionamos esse listener como rede de segurança
+  // adicional para esse caso específico.
+  window.addEventListener('pageshow', (e) => {
+    if (e.persisted) setTimeout(reconnectRealtimeChannel, 150);
   });
 }
 
@@ -1339,6 +1610,12 @@ async function enterRoom(nickname, room, isGM) {
   state.players = {};
   state.enemies = {};
 
+  // 🔧 Define ANTES da tentativa de conexão (não dentro de connectRealtime),
+  // para que uma falha transitória de rede ao reconectar não "esqueça"
+  // qual sala o jogador estava — currentRoomName só deve ser limpo de
+  // fato quando o jogador sai deliberadamente da sala (leaveRoom).
+  currentRoomName = safeRoom;
+
   localStorage.setItem(LS_NICKNAME, safeNickname);
   localStorage.setItem(LS_ROOM, safeRoom);
   localStorage.setItem(LS_IS_GM, state.isGM ? '1' : '0');
@@ -1357,6 +1634,7 @@ async function enterRoom(nickname, room, isGM) {
     rolledAt: null,
     rolledAtStr: null,
     isReroll: false,
+    manualOverride: false,
     avatarUrl: state.avatarUrl,
   };
 
@@ -1384,6 +1662,11 @@ async function leaveRoom() {
     }
     channel = null;
   }
+  // 🔧 Limpa o estado de conexão para que a reconexão automática via
+  // Visibility API (setupVisibilityReconnect) não tente reconectar a
+  // uma sala que o jogador saiu deliberadamente.
+  isRealtimeConnected = false;
+  currentRoomName = null;
   // 🔒 CORREÇÃO BUG A: reset COMPLETO do estado de sessão/identidade.
   // Antes, apenas players/enemies eram limpos — nickname, room, isGM e
   // userId permaneciam "vazando" do login anterior. Isso fazia com que,
@@ -1484,6 +1767,7 @@ function checkRealtimeConfig() {
 // ──────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   checkRealtimeConfig();
+  setupVisibilityReconnect(); // 🔧 correção "Background Disconnect"
 
   // Preenche campos a partir do localStorage (conveniência, não dados sensíveis)
   const savedNick = localStorage.getItem(LS_NICKNAME) ?? '';
@@ -1548,6 +1832,9 @@ document.addEventListener('DOMContentLoaded', () => {
   // ── Painel do GM (perfis de inimigos) ──
   document.getElementById('btn-gm-panel').addEventListener('click', openGmPanel);
   document.getElementById('btn-gm-close').addEventListener('click', closeGmPanel);
+  document.getElementById('btn-reveal-enemies').addEventListener('click', () => {
+    if (state.isGM) broadcastRevealEnemies();
+  });
   document.getElementById('modal-gm').addEventListener('click', (e) => {
     if (e.target.id === 'modal-gm') closeGmPanel();
   });
@@ -1569,6 +1856,25 @@ document.addEventListener('DOMContentLoaded', () => {
     const id = btn.dataset.id;
     if (btn.dataset.action === 'roll-enemy') startEnemyRoll(id);
     if (btn.dataset.action === 'delete-enemy') deleteEnemyProfile(id);
+  });
+
+  // 🆕 Delegação de evento para o clique no número de iniciativa (edição
+  // manual pelo GM). O grid é reconstruído a cada render, por isso a
+  // delegação no container pai em vez de listener por card individual.
+  document.getElementById('players-grid').addEventListener('click', (e) => {
+    if (!state.isGM) return; // 🔒 segunda camada de defesa, além do elemento só existir no DOM do GM
+    const target = e.target.closest('[data-action="edit-initiative"]');
+    if (!target) return;
+    openEditInitiativeModal(target.dataset.id);
+  });
+
+  document.getElementById('btn-edit-initiative-cancel').addEventListener('click', closeEditInitiativeModal);
+  document.getElementById('btn-edit-initiative-confirm').addEventListener('click', confirmEditInitiative);
+  document.getElementById('input-edit-initiative').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') confirmEditInitiative();
+  });
+  document.getElementById('modal-edit-initiative').addEventListener('click', (e) => {
+    if (e.target.id === 'modal-edit-initiative') closeEditInitiativeModal();
   });
 
   // ── Sair da sala ──
@@ -1602,7 +1908,8 @@ document.addEventListener('DOMContentLoaded', () => {
       || !document.getElementById('modal-gm').classList.contains('hidden')
       || !document.getElementById('modal-nat').classList.contains('hidden')
       || !document.getElementById('modal-reroll').classList.contains('hidden')
-      || !document.getElementById('modal-avatar').classList.contains('hidden');
+      || !document.getElementById('modal-avatar').classList.contains('hidden')
+      || !document.getElementById('modal-edit-initiative').classList.contains('hidden');
     if (e.code === 'Space' && gameVisible && !modalsOpen && !e.target.matches('input,textarea,button')) {
       e.preventDefault();
       rollDiceClicked();

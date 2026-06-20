@@ -51,6 +51,17 @@
 /* ── Reset base ── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; overflow: hidden; }
+/* 🔧 MOBILE FIX: 100vh em navegadores móveis (especialmente Safari iOS)
+   é calculado SEM descontar a barra de endereço/navegação, então fica
+   maior que a área realmente visível — empurrando elementos como o
+   botão de rolar para fora da tela, sem permitir scroll (overflow:
+   hidden). dvh (dynamic viewport height) já desconta isso e é
+   suportado em todos os browsers mobile relevantes; mantemos vh como
+   fallback para navegadores muito antigos que não reconhecem dvh. */
+:root { --app-height: 100vh; }
+@supports (height: 100dvh) {
+  :root { --app-height: 100dvh; }
+}
 body {
   font-family: var(--font-body);
   background-color: var(--color-void);
@@ -267,8 +278,13 @@ button { font-family: inherit; }
 .screen-game {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: var(--app-height);
   overflow: hidden;
+  /* 🔧 MOBILE FIX: respeita a área segura inferior em iPhones com
+     home indicator (sem notch físico, mas com gesto de "puxar para
+     fechar"), evitando que o botão de rolar fique colado/cortado
+     pela borda do sistema. Em telas sem essa área, isso vira 0px. */
+  padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 
 .app-header {
@@ -353,11 +369,15 @@ button { font-family: inherit; }
 .avatar-upload-status.is-error { color: var(--color-danger-light); }
 .avatar-upload-status.is-success { color: var(--color-success); }
 
-.app-body { flex: 1; display: flex; overflow: hidden; }
+.app-body { flex: 1; display: flex; overflow: hidden; min-height: 0; }
 
 .main-column {
   flex: 1; display: flex; flex-direction: column;
   overflow: hidden; padding: 16px; gap: 14px;
+  min-height: 0; /* 🔧 MOBILE FIX: sem isso, alguns browsers mobile
+    deixam o filho flex (.players-grid) crescer além do espaço
+    disponível em vez de ativar seu próprio scroll, empurrando a
+    .roll-bar abaixo para fora da tela. */
 }
 
 /* ── Sala de espera ── */
@@ -491,6 +511,15 @@ button { font-family: inherit; }
 .dice-value.nat1 { color: var(--color-danger-light); text-shadow: 0 0 10px rgba(239, 68, 68, 0.6); }
 .dice-value.normal, .dice-value.empty { color: var(--text-primary); }
 .dice-value.empty { color: var(--color-rune-border); }
+/* 🆕 Edição direta de iniciativa pelo GM: o número fica clicável,
+   com indicação visual sutil (sublinhado pontilhado + cursor) para
+   não competir visualmente com o destaque normal do valor rolado. */
+.dice-value.gm-editable {
+  cursor: pointer;
+  border-bottom: 2px dotted currentColor;
+  transition: opacity 0.15s;
+}
+.dice-value.gm-editable:hover { opacity: 0.75; }
 .roll-caption { font-size: 0.68rem; margin-top: 2px; color: var(--text-muted); }
 .roll-caption.crit { color: var(--color-ember-light); font-weight: 700; }
 .roll-caption.fail { color: var(--color-danger-light); font-weight: 700; }
@@ -612,6 +641,7 @@ button { font-family: inherit; }
 #modal-modifier { z-index: 110; }
 #modal-reroll { z-index: 110; }
 #modal-avatar { z-index: 110; }
+#modal-edit-initiative { z-index: 110; }
 #modal-nat { z-index: 120; }
 .modal-box {
   background: var(--color-void-50);
@@ -642,7 +672,7 @@ button { font-family: inherit; }
 .enemy-form-field { flex: 1; margin-bottom: 10px; }
 .enemy-form-field-sm { flex: 0 0 110px; }
 
-.enemy-list-head { margin-bottom: 8px; }
+.enemy-list-head { margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .enemy-list { display: flex; flex-direction: column; gap: 8px; max-height: 260px; overflow-y: auto; }
 .enemy-row {
   display: flex; align-items: center; gap: 10px;

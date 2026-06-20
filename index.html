@@ -267,6 +267,22 @@
   </div>
 
   <!-- ════════════════════════════════════════════
+       MODAL: EDITAR INICIATIVA MANUALMENTE (GM)
+  ════════════════════════════════════════════ -->
+  <div id="modal-edit-initiative" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="edit-initiative-title">
+    <div class="modal-box modal-box-center">
+      <h2 id="edit-initiative-title" class="modal-title">Editar Iniciativa</h2>
+      <p id="edit-initiative-subtext" class="modal-subtext">Defina o valor de iniciativa para esta rodada.</p>
+      <label class="field-label" for="input-edit-initiative">Novo total</label>
+      <input id="input-edit-initiative" class="rune-input" type="number" step="1" placeholder="Ex: 18" />
+      <div class="modal-actions modal-actions-center">
+        <button id="btn-edit-initiative-cancel" class="btn-ghost" type="button">Cancelar</button>
+        <button id="btn-edit-initiative-confirm" class="btn-primary" type="button">Salvar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ════════════════════════════════════════════
        MODAL: PAINEL DO MESTRE (PERFIS DE INIMIGOS)
   ════════════════════════════════════════════ -->
   <div id="modal-gm" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="gm-modal-title">
@@ -297,6 +313,9 @@
 
       <div class="enemy-list-head">
         <span class="section-count">Perfis de Inimigos</span>
+        <button id="btn-reveal-enemies" class="small-btn" type="button" title="Torna visível o nome real de todos os inimigos em Modo Furtivo">
+          👁️ Revelar Ocultos
+        </button>
       </div>
       <div id="enemy-list" class="enemy-list">
         <p class="empty-hint">Nenhum inimigo cadastrado ainda.</p>
