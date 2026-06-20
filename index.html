@@ -246,7 +246,7 @@
   </div>
 
   <!-- ════════════════════════════════════════════
-       MODAL: TROCAR FOTO DE PERFIL
+       MODAL: TROCAR FOTO DE PERFIL (LINK PÚBLICO)
   ════════════════════════════════════════════ -->
   <div id="modal-avatar" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="avatar-title">
     <div class="modal-box modal-box-center">
@@ -254,14 +254,14 @@
       <div id="avatar-preview-wrap" class="avatar-preview-wrap">
         <div id="avatar-preview" class="avatar-circle avatar-preview">?</div>
       </div>
-      <p class="modal-subtext">Escolha uma imagem (PNG, JPG ou WEBP, até 2MB).</p>
-      <input id="input-avatar-file" type="file" accept="image/png,image/jpeg,image/webp" class="avatar-file-input" />
-      <label for="input-avatar-file" class="btn-ghost btn-block avatar-file-label">Escolher Imagem</label>
+      <p class="modal-subtext">Cole o link público de uma imagem (ex: Imgur, Discord CDN).</p>
+      <label class="field-label" for="input-avatar-url">URL da imagem</label>
+      <input id="input-avatar-url" class="rune-input" type="url" placeholder="https://exemplo.com/minha-foto.png" maxlength="500" autocomplete="off" />
       <p id="avatar-upload-status" class="modal-subtext avatar-upload-status"></p>
       <div class="modal-actions modal-actions-center">
         <button id="btn-avatar-remove" class="btn-ghost" type="button">Usar Iniciais</button>
         <button id="btn-avatar-cancel" class="btn-ghost" type="button">Cancelar</button>
-        <button id="btn-avatar-save" class="btn-primary" type="button" disabled>Salvar Foto</button>
+        <button id="btn-avatar-save" class="btn-primary" type="button">Salvar Foto</button>
       </div>
     </div>
   </div>

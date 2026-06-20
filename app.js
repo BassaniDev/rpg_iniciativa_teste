@@ -34,13 +34,8 @@ const NICKNAME_MAX_LEN = 24;
 const ROOM_MAX_LEN = 40;
 const MODIFIER_MIN = -99;
 const MODIFIER_MAX = 99;
-
-// 🖼️ Bucket do Supabase Storage usado para fotos de perfil. Precisa ser
-// criado manualmente no painel do Supabase como bucket PÚBLICO — veja
-// a seção "Fotos de Perfil (Avatar Upload)" no SETUP.md.
-const AVATAR_BUCKET = 'avatars';
-const AVATAR_MAX_BYTES = 2 * 1024 * 1024; // 2MB
-const AVATAR_ALLOWED_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
+const AVATAR_URL_MAX_LEN = 500;
+const LS_LAST_MODIFIER = 'rpg_initiative_last_modifier'; // 🔄 persistência do bônus (item 3)
 
 let supabaseClient = null;
 let channel = null;
@@ -62,7 +57,8 @@ const state = {
   enemies: {}, // { enemyId: EnemyProfile } — perfis criados pelo GM
   userId: '',
   pendingModifierContext: null, // guarda o que fazer quando o modal de modificador confirmar
-  avatarUrl: null, // URL pública da foto de perfil (Supabase Storage), null = usa iniciais
+  avatarUrl: null, // URL pública (link externo) da foto de perfil, null = usa iniciais
+  lastModifier: null, // 🔄 ITEM 3: último bônus situacional digitado pelo jogador (string crua)
 };
 
 const logLines = [];
@@ -119,18 +115,37 @@ function initials(nick) {
  * de renderização (card, sala de espera, status bar, header) fiquem
  * consistentes — evita ter essa lógica duplicada em 4 lugares.
  */
+/**
+ * Gera os atributos/HTML interno para um círculo de avatar.
+ * 🖼️ MUDANÇA: agora usa um elemento <img> real (com object-fit: cover)
+ * em vez de background-image. Vantagens práticas:
+ *   1) object-fit: cover centraliza e corta a imagem sem distorcer,
+ *      exatamente como pedido, com tamanho sempre fixo pelo círculo pai;
+ *   2) o atributo onerror do <img> nos dá um fallback NATIVO do
+ *      navegador: se o link público estiver quebrado/expirado, o
+ *      avatar cai sozinho para as iniciais, sem JS extra de verificação.
+ * Centralizado aqui para que todos os pontos de renderização (card,
+ * sala de espera, status bar, header) fiquem consistentes.
+ */
 function avatarVisual(displayName, avatarUrl) {
+  const safeName = sanitizeText(displayName) || '?';
   if (avatarUrl) {
-    // 🔒 Escapa a URL antes de injetar em atributo inline — mesmo vindo
-    // do nosso próprio Storage, nunca confiamos em string crua em HTML.
+    // 🔒 Escapa a URL antes de injetar em atributo HTML.
     const safeUrl = escapeHtml(avatarUrl);
-    return { className: 'avatar-circle has-photo', styleExtra: `background-image:url('${safeUrl}');`, label: '' };
+    const fallbackInitials = escapeHtml(initials(safeName));
+    // onerror: troca o próprio <img> pelas iniciais em caso de link
+    // inválido/expirado — usa replaceWith para nunca deixar um ícone
+    // de imagem quebrada visível ao jogador.
+    const innerHtml = `<img src="${safeUrl}" alt="${escapeHtml(safeName)}" class="avatar-img" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('span'),{textContent:'${fallbackInitials}',className:'avatar-fallback-text'}))" />`;
+    return { className: 'avatar-circle has-photo', styleExtra: '', label: '', innerHtml };
   }
-  const colors = colorFromString(displayName);
+  const colors = colorFromString(safeName);
+  const label = initials(safeName);
   return {
     className: 'avatar-circle',
     styleExtra: `background:linear-gradient(135deg, ${colors[0]}, ${colors[1]});`,
-    label: initials(displayName),
+    label,
+    innerHtml: escapeHtml(label),
   };
 }
 
@@ -361,7 +376,7 @@ function renderWaitingRoom() {
       const av = avatarVisual(displayName, p.avatarUrl);
       return `
         <div class="waiting-chip">
-          <div class="${av.className}" style="${av.styleExtra}">${av.label}</div>
+          <div class="${av.className}" style="${av.styleExtra}">${av.innerHtml}</div>
           <span class="waiting-chip-name">${escapeHtml(displayName)}</span>
           ${p.isGM ? '<span class="waiting-chip-tag">GM</span>' : ''}
         </div>`;
@@ -419,7 +434,7 @@ function buildPlayerCard(player, rank) {
     <div id="card-${player.id}" class="${cardClasses}">
       <div class="card-top-row">
         <div class="avatar-wrap">
-          <div class="${av.className}" style="${av.styleExtra}">${av.label}</div>
+          <div class="${av.className}" style="${av.styleExtra}">${av.innerHtml}</div>
           <span class="status-dot ${player.online ? 'online' : 'offline'}"></span>
         </div>
         <div class="card-name-block">
@@ -529,7 +544,7 @@ function updateMyStatusBar() {
   const myAvatar = avatarVisual(state.nickname, state.avatarUrl);
   [document.getElementById('my-avatar-sm'), document.getElementById('header-avatar')].forEach((el) => {
     if (!el) return;
-    el.textContent = myAvatar.label;
+    el.innerHTML = myAvatar.innerHtml;
     el.className = el.id === 'my-avatar-sm' ? `${myAvatar.className} avatar-sm` : myAvatar.className;
     el.setAttribute('style', myAvatar.styleExtra);
   });
@@ -553,11 +568,44 @@ function animateCard(userId, value) {
 // ──────────────────────────────────────────────────────────────
 //  MODAL: MODIFICADOR DINÂMICO (antes de confirmar a rolagem)
 // ──────────────────────────────────────────────────────────────
+
+/**
+ * 🔄 ITEM 3: lê o último bônus situacional usado pelo jogador, com
+ * fallback em cascata: state em memória (mais rápido, válido durante
+ * a sessão atual) → localStorage (sobrevive a um refresh de página).
+ * Guardamos como STRING (não número) para preservar exatamente o que
+ * o jogador digitou, incluindo o caso de campo vazio.
+ */
+function getLastModifierValue() {
+  if (state.lastModifier !== null && state.lastModifier !== undefined) return state.lastModifier;
+  try {
+    const stored = localStorage.getItem(LS_LAST_MODIFIER);
+    return stored !== null ? stored : '';
+  } catch {
+    return ''; // localStorage pode estar bloqueado (modo privado, etc.)
+  }
+}
+
+function saveLastModifierValue(value) {
+  state.lastModifier = value;
+  try {
+    localStorage.setItem(LS_LAST_MODIFIER, value);
+  } catch {
+    // Falha silenciosa: se localStorage estiver indisponível, a
+    // persistência ainda funciona durante a sessão via state em memória.
+  }
+}
+
 function openModifierModal(context) {
   state.pendingModifierContext = context;
-  document.getElementById('input-modifier').value = '';
+  const input = document.getElementById('input-modifier');
+  // 🔄 ITEM 3: pré-popula com o último bônus usado, mas SÓ para
+  // rolagens do próprio jogador — rolagens de inimigo (GM) sempre
+  // começam vazias, já que cada monstro tende a ter um modificador
+  // situacional diferente e não devem herdar o bônus pessoal do GM.
+  input.value = context?.type === 'player_roll' ? getLastModifierValue() : '';
   document.getElementById('modal-modifier').classList.remove('hidden');
-  setTimeout(() => document.getElementById('input-modifier')?.focus(), 50);
+  setTimeout(() => input?.focus(), 50);
 }
 
 function closeModifierModal() {
@@ -574,6 +622,10 @@ function confirmModifierModal() {
   if (!context) return;
 
   if (context.type === 'player_roll') {
+    // 🔄 ITEM 3: persiste exatamente o que foi digitado (string crua),
+    // para o campo continuar mostrando "2" e não "2.0" ou algo do tipo,
+    // e para preservar um campo vazio como "vazio" na próxima rolagem.
+    saveLastModifierValue(raw);
     executePlayerRoll(dynamicMod, !!context.isReroll);
   } else if (context.type === 'enemy_roll') {
     executeEnemyRoll(context.enemyId, dynamicMod);
@@ -657,6 +709,23 @@ async function executePlayerRoll(dynamicMod, isReroll = false) {
       rolledAtStr: nowTime(),
       isReroll,
     });
+
+    // 🔧 CORREÇÃO BUG 1: além do broadcast (que só quem já está
+    // conectado recebe em tempo real), atualizamos nossa entrada de
+    // Presence com o resultado da rolagem. Assim, qualquer jogador
+    // que entrar na sala DEPOIS deste momento ainda consegue ver essa
+    // rolagem ao sincronizar o presenceState, em vez de só receber
+    // eventos futuros.
+    if (channel) {
+      await channel.track({
+        userId: state.userId,
+        nickname: state.nickname,
+        isGM: state.isGM,
+        avatarUrl: state.avatarUrl,
+        lastRoll: getMyLastRollPayload(),
+        joinedAt: Date.now(),
+      });
+    }
   } finally {
     rollInFlight = false;
     btn.disabled = false; // 🔄 sempre reabilita: re-roll deve continuar disponível
@@ -720,6 +789,31 @@ function applyRollToPlayer(userId, payload) {
   // (rolagens não recarregam a foto a cada vez; presence sync é quem
   // mantém isso atualizado quando o jogador troca de foto no meio do jogo).
   if (payload.avatarUrl !== undefined) p.avatarUrl = typeof payload.avatarUrl === 'string' ? payload.avatarUrl : null;
+}
+
+/**
+ * 🔧 CORREÇÃO BUG 1 (late join): devolve o último resultado de
+ * rolagem do PRÓPRIO jogador, no mesmo formato aceito por
+ * applyRollToPlayer. Esse objeto é incluído no payload do Presence
+ * (channel.track), para que qualquer pessoa que entre na sala DEPOIS
+ * da rolagem consiga recuperá-la a partir do presenceState atual —
+ * sem precisar de nenhuma tabela no banco, já que o Presence já
+ * mantém e propaga o estado de quem está conectado no momento.
+ * Retorna null se o jogador ainda não rolou nesta rodada.
+ */
+function getMyLastRollPayload() {
+  const me = state.players[state.userId];
+  if (!me || me.roll === null || me.roll === undefined) return null;
+  return {
+    roll: me.roll,
+    staticMod: me.staticMod,
+    dynamicMod: me.dynamicMod,
+    total: me.total,
+    rolledAt: me.rolledAt,
+    rolledAtStr: me.rolledAtStr,
+    isReroll: me.isReroll,
+    round: state.round,
+  };
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -1019,7 +1113,9 @@ async function connectRealtime(room) {
       presences.forEach((presence) => {
         const uid = presence.userId;
         if (!uid) return; // 🔒 TRAVA: ignora presença sem ID
-        if (!state.players[uid]) {
+        const isNewPlayer = !state.players[uid];
+
+        if (isNewPlayer) {
           state.players[uid] = {
             id: uid,
             nickname: sanitizeText(presence.nickname) || 'Anônimo',
@@ -1041,6 +1137,26 @@ async function connectRealtime(room) {
           // 🖼️ Mantém a foto de perfil sincronizada mesmo se o jogador
           // trocá-la DEPOIS de já estar na sala (re-track de presence).
           state.players[uid].avatarUrl = typeof presence.avatarUrl === 'string' ? presence.avatarUrl : null;
+        }
+
+        // 🔧 CORREÇÃO BUG 1 (late join): se a presença trouxe uma
+        // rolagem (lastRoll) DA RODADA ATUAL, aplicamos ela ao
+        // registro local — é assim que um jogador que entrou depois
+        // das rolagens conseguem ver os resultados já existentes,
+        // sem depender de ter "perdido" os eventos de broadcast.
+        // 🔒 TRAVA: só aplica se for da rodada atual (round) — evita
+        // "ressuscitar" o resultado de uma rodada antiga para alguém
+        // que entrou depois do GM já ter avançado o combate. Também só
+        // aplica se ainda não temos uma rolagem local mais recente
+        // (rolledAt maior), para nunca sobrescrever um re-roll que já
+        // recebemos via broadcast com um dado de presence desatualizado.
+        const lastRoll = presence.lastRoll;
+        if (lastRoll && typeof lastRoll === 'object' && lastRoll.round === state.round) {
+          const existing = state.players[uid];
+          const incomingIsNewer = !existing.rolledAt || (lastRoll.rolledAt ?? 0) >= existing.rolledAt;
+          if (incomingIsNewer) {
+            applyRollToPlayer(uid, { ...lastRoll, nickname: presence.nickname, isGM: presence.isGM, avatarUrl: presence.avatarUrl });
+          }
         }
       });
     });
@@ -1072,7 +1188,7 @@ async function connectRealtime(room) {
 
   await channel.subscribe(async (status) => {
     if (status === 'SUBSCRIBED') {
-      await channel.track({ userId: state.userId, nickname: state.nickname, isGM: state.isGM, avatarUrl: state.avatarUrl, joinedAt: Date.now() });
+      await channel.track({ userId: state.userId, nickname: state.nickname, isGM: state.isGM, avatarUrl: state.avatarUrl, lastRoll: getMyLastRollPayload(), joinedAt: Date.now() });
       addLog(`Conectado à sala "${room}".`, 'gm');
     } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
       showToast('❌ Erro de conexão. Tente novamente em alguns instantes.', 'error', 8000);
@@ -1081,30 +1197,25 @@ async function connectRealtime(room) {
 }
 
 // ──────────────────────────────────────────────────────────────
-//  FOTO DE PERFIL (UPLOAD VIA SUPABASE STORAGE)
+//  FOTO DE PERFIL (LINK PÚBLICO DE IMAGEM)
+//  🔄 MUDANÇA: o upload via Supabase Storage foi removido. Agora o
+//  jogador apenas cola a URL pública de uma imagem já hospedada em
+//  algum lugar da internet (Imgur, Discord CDN, etc). Isso elimina
+//  toda a complexidade de bucket/política de Storage — a foto é só
+//  uma string de URL guardada no state e propagada via Presence,
+//  exatamente como já fazíamos antes, só que sem o passo de upload.
 // ──────────────────────────────────────────────────────────────
 
-let pendingAvatarFile = null; // arquivo selecionado, aguardando confirmação de "Salvar Foto"
-
 function openAvatarModal() {
-  pendingAvatarFile = null;
-  document.getElementById('input-avatar-file').value = '';
-  document.getElementById('btn-avatar-save').disabled = true;
+  document.getElementById('input-avatar-url').value = state.avatarUrl || '';
   setAvatarUploadStatus('', null);
-
-  // Pré-popula o preview com a foto atual (se houver) ou as iniciais.
-  const av = avatarVisual(state.nickname, state.avatarUrl);
-  const preview = document.getElementById('avatar-preview');
-  preview.className = `avatar-circle avatar-preview${av.className.includes('has-photo') ? ' has-photo' : ''}`;
-  preview.setAttribute('style', av.styleExtra);
-  preview.textContent = av.label;
-
+  refreshAvatarUrlPreview();
   document.getElementById('modal-avatar').classList.remove('hidden');
+  setTimeout(() => document.getElementById('input-avatar-url')?.focus(), 50);
 }
 
 function closeAvatarModal() {
   document.getElementById('modal-avatar').classList.add('hidden');
-  pendingAvatarFile = null;
 }
 
 function setAvatarUploadStatus(msg, kind) {
@@ -1117,128 +1228,85 @@ function setAvatarUploadStatus(msg, kind) {
 }
 
 /**
- * 🔒 VALIDAÇÃO DE ARQUIVO (Bug B): antes de sequer tentar o upload,
- * validamos tipo MIME e tamanho. A causa mais comum de "erro ao
- * atualizar a foto de perfil" é tentar subir um arquivo grande demais
- * ou de um tipo não aceito pela política do bucket — validar aqui dá
- * uma mensagem clara em vez de um erro genérico de rede.
+ * 🔒 VALIDAÇÃO DE URL: aceita apenas http(s) bem formado. Não há como
+ * verificar no cliente se a URL realmente aponta para uma imagem válida
+ * sem carregá-la (CORS pode bloquear até isso) — por isso o preview ao
+ * vivo no próprio modal é a confirmação visual: se a imagem não carregar,
+ * o <img> dispara onerror e avisamos o jogador ali mesmo, sem travar o
+ * salvamento (a URL pode estar correta mas momentaneamente fora do ar).
  */
-function validateAvatarFile(file) {
-  if (!file) return 'Nenhum arquivo selecionado.';
-  if (!AVATAR_ALLOWED_TYPES.includes(file.type)) {
-    return 'Formato não suportado. Use PNG, JPG ou WEBP.';
+function validateAvatarUrl(rawUrl) {
+  const url = sanitizeText(rawUrl, AVATAR_URL_MAX_LEN);
+  if (!url) return { error: null, url: '' }; // campo vazio = remover foto, sempre válido
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return { error: 'A URL precisa começar com http:// ou https://', url: null };
+    }
+    return { error: null, url: parsed.href };
+  } catch {
+    return { error: 'Isso não parece ser uma URL válida.', url: null };
   }
-  if (file.size > AVATAR_MAX_BYTES) {
-    return `Arquivo muito grande (máx. ${(AVATAR_MAX_BYTES / (1024 * 1024)).toFixed(0)}MB).`;
-  }
-  return null; // válido
 }
 
-function handleAvatarFileSelected(file) {
-  const error = validateAvatarFile(file);
+function refreshAvatarUrlPreview() {
+  const raw = document.getElementById('input-avatar-url').value;
+  const { error, url } = validateAvatarUrl(raw);
+  const preview = document.getElementById('avatar-preview');
+  const saveBtn = document.getElementById('btn-avatar-save');
+
   if (error) {
     setAvatarUploadStatus(`⚠️ ${error}`, 'error');
-    document.getElementById('btn-avatar-save').disabled = true;
-    pendingAvatarFile = null;
+    saveBtn.disabled = true;
     return;
   }
 
-  pendingAvatarFile = file;
-  setAvatarUploadStatus('Pronto para enviar.', null);
-  document.getElementById('btn-avatar-save').disabled = false;
+  saveBtn.disabled = false;
+  const av = avatarVisual(state.nickname, url || null);
+  preview.className = `${av.className} avatar-preview`;
+  preview.setAttribute('style', av.styleExtra);
+  preview.innerHTML = av.innerHtml;
 
-  // Preview local instantâneo via blob URL — não depende do upload
-  // ter terminado para o jogador já ver como a foto vai ficar.
-  const blobUrl = URL.createObjectURL(file);
-  const preview = document.getElementById('avatar-preview');
-  preview.className = 'avatar-circle avatar-preview has-photo';
-  preview.style.backgroundImage = `url('${blobUrl}')`;
-  preview.textContent = '';
+  if (!url) {
+    setAvatarUploadStatus('Sem imagem — será usado o avatar de iniciais.', null);
+    return;
+  }
+
+  // Confirmação extra de carregamento (o <img> já tem fallback via
+  // onerror, isto aqui é só para dar feedback textual de sucesso).
+  setAvatarUploadStatus('Carregando pré-visualização...', null);
+  const tester = new Image();
+  tester.onload = () => setAvatarUploadStatus('✓ Imagem encontrada.', 'success');
+  tester.onerror = () => setAvatarUploadStatus('⚠️ Não foi possível carregar essa imagem. Verifique o link.', 'error');
+  tester.src = url;
 }
 
-/**
- * Envia o arquivo para o bucket público de avatares no Supabase Storage
- * e retorna a URL pública resultante.
- * 🔒 TRAVA: nome de arquivo gerado com genUniqueId (nunca usa o nome
- * original do arquivo do usuário) — evita colisão entre jogadores e
- * also evita problemas de caracteres especiais/path traversal no nome.
- */
-async function uploadAvatarToStorage(file) {
-  if (!supabaseClient) {
-    throw new Error('Sem conexão configurada — não é possível enviar a foto agora.');
-  }
-  const ext = (file.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
-  const path = `${state.userId}/${genUniqueId('avatar')}.${ext}`;
-
-  const { error: uploadError } = await supabaseClient.storage
-    .from(AVATAR_BUCKET)
-    .upload(path, file, { cacheControl: '3600', upsert: false, contentType: file.type });
-
-  if (uploadError) {
-    // Mensagens mais claras para as causas mais comuns de falha.
-    const msg = uploadError.message || '';
-    if (msg.includes('Bucket not found')) {
-      throw new Error('Bucket de avatares não configurado no Supabase (veja SETUP.md).');
-    }
-    if (msg.includes('row-level security') || msg.includes('policy')) {
-      throw new Error('Permissão negada pelo Storage (verifique as políticas do bucket no SETUP.md).');
-    }
-    throw new Error(msg || 'Falha desconhecida ao enviar a imagem.');
+function saveAvatar() {
+  const raw = document.getElementById('input-avatar-url').value;
+  const { error, url } = validateAvatarUrl(raw);
+  if (error) {
+    setAvatarUploadStatus(`⚠️ ${error}`, 'error');
+    return;
   }
 
-  const { data: publicData } = supabaseClient.storage.from(AVATAR_BUCKET).getPublicUrl(path);
-  if (!publicData?.publicUrl) {
-    throw new Error('Upload concluído, mas não foi possível obter a URL pública.');
-  }
-  return publicData.publicUrl;
-}
-
-async function saveAvatar() {
-  if (!pendingAvatarFile) return;
-  const btn = document.getElementById('btn-avatar-save');
-  btn.disabled = true;
-  setAvatarUploadStatus('Enviando imagem...', null);
-
-  try {
-    const publicUrl = await uploadAvatarToStorage(pendingAvatarFile);
-    state.avatarUrl = publicUrl;
-
-    // Atualiza o próprio registro localmente de forma imediata...
-    if (state.players[state.userId]) state.players[state.userId].avatarUrl = publicUrl;
-    updateMyStatusBar();
-    renderPlayersGrid();
-
-    // ...e re-transmite a presença para que os outros jogadores
-    // recebam a nova foto sem precisar recarregar a página.
-    if (channel) {
-      await channel.track({ userId: state.userId, nickname: state.nickname, isGM: state.isGM, avatarUrl: state.avatarUrl, joinedAt: Date.now() });
-    }
-
-    setAvatarUploadStatus('✓ Foto atualizada!', 'success');
-    showToast('🖼️ Foto de perfil atualizada!', 'success', 2500);
-    setTimeout(closeAvatarModal, 700);
-  } catch (err) {
-    console.error('Falha no upload de avatar:', err);
-    // 🔒 CORREÇÃO BUG B: em vez de uma falha silenciosa ou um erro
-    // genérico, mostramos o motivo específico (formato, tamanho,
-    // bucket ausente, política de acesso) tanto no modal quanto em
-    // um toast, e MANTEMOS o modal aberto para o jogador tentar de novo.
-    setAvatarUploadStatus(`⚠️ ${err.message}`, 'error');
-    showToast(`❌ Não foi possível atualizar a foto: ${err.message}`, 'error', 6000);
-    btn.disabled = false;
-  }
-}
-
-async function removeAvatar() {
-  state.avatarUrl = null;
-  if (state.players[state.userId]) state.players[state.userId].avatarUrl = null;
+  state.avatarUrl = url || null;
+  if (state.players[state.userId]) state.players[state.userId].avatarUrl = state.avatarUrl;
   updateMyStatusBar();
   renderPlayersGrid();
+
+  // Re-transmite a presença para que os outros jogadores recebam a
+  // foto (ou a remoção dela) sem precisar recarregar a página.
   if (channel) {
-    await channel.track({ userId: state.userId, nickname: state.nickname, isGM: state.isGM, avatarUrl: null, joinedAt: Date.now() });
+    channel.track({ userId: state.userId, nickname: state.nickname, isGM: state.isGM, avatarUrl: state.avatarUrl, lastRoll: getMyLastRollPayload(), joinedAt: Date.now() });
   }
-  showToast('Foto removida — usando iniciais.', 'info', 2000);
+
+  showToast(state.avatarUrl ? '🖼️ Foto de perfil atualizada!' : 'Foto removida — usando iniciais.', state.avatarUrl ? 'success' : 'info', 2500);
   closeAvatarModal();
+}
+
+function removeAvatarField() {
+  document.getElementById('input-avatar-url').value = '';
+  refreshAvatarUrlPreview();
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -1333,6 +1401,10 @@ async function leaveRoom() {
   state.hasRolled = false;
   state.avatarUrl = null;
   state.pendingModifierContext = null;
+  // 🔄 ITEM 3: limpa apenas o cache em memória — o valor persistido no
+  // localStorage permanece intacto, então o próximo login (mesmo sem
+  // refresh) volta a ler o último bônus salvo via getLastModifierValue().
+  state.lastModifier = null;
   logLines.length = 0;
   resetGmUI(); // 🔒 esconde explicitamente os botões de GM antes de voltar ao login
   showLoginScreen();
@@ -1450,13 +1522,14 @@ document.addEventListener('DOMContentLoaded', () => {
     if (e.target.id === 'modal-reroll') closeRerollModal();
   });
 
-  // ── Modal de foto de perfil (avatar) ──
+  // ── Modal de foto de perfil (avatar via link público) ──
   document.getElementById('btn-change-avatar').addEventListener('click', openAvatarModal);
   document.getElementById('btn-avatar-cancel').addEventListener('click', closeAvatarModal);
   document.getElementById('btn-avatar-save').addEventListener('click', saveAvatar);
-  document.getElementById('btn-avatar-remove').addEventListener('click', removeAvatar);
-  document.getElementById('input-avatar-file').addEventListener('change', (e) => {
-    handleAvatarFileSelected(e.target.files?.[0] ?? null);
+  document.getElementById('btn-avatar-remove').addEventListener('click', removeAvatarField);
+  document.getElementById('input-avatar-url').addEventListener('input', refreshAvatarUrlPreview);
+  document.getElementById('input-avatar-url').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') saveAvatar();
   });
   document.getElementById('modal-avatar').addEventListener('click', (e) => {
     if (e.target.id === 'modal-avatar') closeAvatarModal();

@@ -306,16 +306,30 @@ button { font-family: inherit; }
   display: flex; align-items: center; justify-content: center;
   font-size: 0.72rem; font-weight: 700; color: white;
   background: linear-gradient(135deg, var(--color-arcane), var(--color-mystic));
-  background-size: cover;
-  background-position: center;
   flex: none;
+  overflow: hidden; /* garante que a <img> filha nunca escape do círculo */
 }
 .avatar-sm { width: 28px; height: 28px; font-size: 0.7rem; }
 
-/* Quando o avatar tem foto (background-image inline), escondemos as
-   iniciais de texto via classe, em vez de depender só do background
-   cobrir o texto — garante contraste/legibilidade em qualquer imagem. */
-.avatar-circle.has-photo { color: transparent; }
+/* 🖼️ Imagem de perfil via link público: object-fit cover preenche o
+   círculo inteiro, sempre centralizada e cortada sem distorcer,
+   independente das proporções originais da imagem (requisito visual). */
+.avatar-img {
+  width: 100%; height: 100%;
+  object-fit: cover;
+  object-position: center;
+  display: block;
+}
+/* Texto de fallback inserido via JS (onerror do <img>) quando o link
+   da imagem está quebrado/expirado — reaproveita o mesmo gradiente
+   de fundo do avatar-circle, já que .has-photo não chega a aplicar
+   sem a imagem carregada. */
+.avatar-fallback-text {
+  width: 100%; height: 100%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: inherit; font-weight: inherit; color: white;
+  background: linear-gradient(135deg, var(--color-arcane), var(--color-mystic));
+}
 
 /* ── Botão de troca de avatar (barra de status do jogador) ── */
 .avatar-button {
@@ -332,11 +346,9 @@ button { font-family: inherit; }
   border: 1px solid var(--color-void);
 }
 
-/* ── Modal de avatar ── */
+/* ── Modal de avatar (link público) ── */
 .avatar-preview-wrap { display: flex; justify-content: center; margin: 12px 0; }
 .avatar-preview { width: 84px; height: 84px; font-size: 1.6rem; }
-.avatar-file-input { display: none; }
-.avatar-file-label { display: block; text-align: center; cursor: pointer; margin-top: 8px; }
 .avatar-upload-status { min-height: 1.2em; }
 .avatar-upload-status.is-error { color: var(--color-danger-light); }
 .avatar-upload-status.is-success { color: var(--color-success); }
