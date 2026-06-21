@@ -77,7 +77,7 @@
           <polygon points="36,6 66,22 66,50 36,66 6,50 6,22" fill="#7C3AED" stroke="#A855F7" stroke-width="1.5"/>
           <text x="36" y="37" text-anchor="middle" font-family="Cinzel,serif" font-size="16" font-weight="900" fill="white" dy="0.3em">D</text>
         </svg>
-        <div>
+        <div class="header-brand-text">
           <div class="header-brand-name">INITIATIVE</div>
           <div class="header-room-row">
             <span class="status-dot online" aria-hidden="true"></span>
@@ -220,9 +220,22 @@
   <div id="modal-modifier" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="modifier-title">
     <div class="modal-box">
       <h2 id="modifier-title" class="modal-title modal-title-left">Modificador da Rolagem</h2>
-      <p class="modal-subtext">Some um valor situacional para esta rodada (vantagem, magia, penalidade...). Pode deixar em branco.</p>
+      <p class="modal-subtext">Some um valor situacional para esta rodada (vantagem, magia, penalidade...). Aceita números ou expressões de dado, como <code>+1d4</code> ou <code>2d6+1</code>. Pode deixar em branco.</p>
+
       <label class="field-label" for="input-modifier">Modificador situacional</label>
-      <input id="input-modifier" class="rune-input" type="number" placeholder="Ex: 2 ou -3" step="1" />
+      <input id="input-modifier" class="rune-input" type="text" inputmode="text" placeholder="Ex: 2, -3, +1d4 ou 2d6+1" autocomplete="off" />
+      <p id="modifier-preview" class="modal-subtext modifier-preview"></p>
+
+      <div id="advantage-row" class="advantage-row">
+        <span class="field-label advantage-label">Tipo de rolagem do D20</span>
+        <div class="advantage-toggle" role="radiogroup" aria-label="Vantagem ou desvantagem">
+          <button type="button" class="advantage-btn active" data-mode="normal">Normal</button>
+          <button type="button" class="advantage-btn" data-mode="advantage">⬆️ Vantagem</button>
+          <button type="button" class="advantage-btn" data-mode="disadvantage">⬇️ Desvantagem</button>
+        </div>
+        <p class="advantage-hint">Vantagem rola 2d20 e usa o maior; Desvantagem rola 2d20 e usa o menor.</p>
+      </div>
+
       <div class="modal-actions">
         <button id="btn-modifier-cancel" class="btn-ghost" type="button">Cancelar</button>
         <button id="btn-modifier-confirm" class="btn-primary" type="button">Confirmar e Rolar</button>

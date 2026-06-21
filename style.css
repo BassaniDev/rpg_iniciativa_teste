@@ -297,14 +297,36 @@ button { font-family: inherit; }
   gap: 12px;
 }
 
-.header-brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.header-brand { display: flex; align-items: center; gap: 12px; min-width: 0; flex-shrink: 1; }
+.header-brand-text { min-width: 0; flex: 1; overflow: hidden; }
 .header-brand-name {
   font-family: var(--font-display);
   font-size: 0.8rem; font-weight: 700;
   color: white; letter-spacing: 0.08em;
+  white-space: nowrap;
 }
-.header-room-row { display: flex; align-items: center; gap: 6px; }
-.header-room-label { font-size: 0.72rem; color: var(--text-secondary); }
+.header-room-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+/* 🔧 TESTE DE ESTRESSE MOBILE: sem isso, um nome de sala longo quebra
+   em múltiplas linhas dentro do header (já que o elemento não tinha
+   limite de largura nem nowrap), empurrando o header inteiro para
+   baixo e desorganizando o layout em telas estreitas. Agora trunca
+   com "..." e nunca ultrapassa o espaço disponível ao lado do logo. */
+.header-room-label {
+  font-size: 0.72rem; color: var(--text-secondary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  min-width: 0;
+}
+
+/* 🔧 TESTE DE ESTRESSE MOBILE: em telas muito estreitas (≤340px), os
+   botões de ação do GM (ícones) + avatar + botão sair já preenchem
+   praticamente toda a largura disponível, sobrando 0px para o nome
+   da sala — o texto era zerado em vez de truncado. A solução real é
+   esconder o texto de branding nessas larguras (mantendo só o ícone
+   do dado, sempre visível), já que não há espaço para os dois
+   coexistirem sem comprometer os controles de jogo, que são essenciais. */
+@media (max-width: 340px) {
+  .header-brand-text { display: none; }
+}
 
 .header-stats { display: flex; align-items: center; gap: 16px; }
 @media (max-width: 640px) { .header-stats { display: none; } }
@@ -435,8 +457,22 @@ button { font-family: inherit; }
 .players-grid {
   flex: 1; display: grid; gap: 12px;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  /* 🔧 CORREÇÃO "Atropelamento na Lista de Iniciativa": sem isso, o
+     grid distribui a altura do container IGUALMENTE entre as linhas
+     (ex: 8 combatentes em ~300px de altura disponível = ~34px por
+     linha), esmagando cada card e cortando o conteúdo (número de
+     iniciativa, dado, barra) em vez de deixar o card crescer e ativar
+     scroll. `min-content` força cada linha a ter, no mínimo, a altura
+     real do conteúdo do card — o excesso vira scroll interno do grid
+     (overflow-y: auto abaixo), nunca compressão. */
+  grid-auto-rows: min-content;
   align-content: start;
   overflow-y: auto;
+  /* 🔧 Altura máxima explícita como rede de segurança extra em mobile,
+     calculada a partir da viewport real (dvh) — garante scroll mesmo
+     se algum ancestral flex falhar em repassar corretamente o espaço
+     disponível em navegadores mais antigos. */
+  max-height: 100%;
   padding-right: 4px;
 }
 
@@ -458,6 +494,12 @@ button { font-family: inherit; }
   display: flex; flex-direction: column; gap: 12px;
   position: relative; overflow: hidden;
   transition: transform 0.2s ease, border-color 0.2s ease;
+  /* 🔧 CORREÇÃO "Atropelamento": altura mínima explícita garante que
+     mesmo um card "vazio" (sem mods/badges) nunca fique menor que o
+     necessário para exibir avatar + nome + número de iniciativa com
+     contraste legível — trabalha em conjunto com grid-auto-rows:
+     min-content no container pai (.players-grid). */
+  min-height: 168px;
 }
 .player-card::before {
   content: ''; position: absolute; inset: 0;
@@ -499,6 +541,12 @@ button { font-family: inherit; }
   display: flex; align-items: center; justify-content: center;
   font-size: 0.68rem; font-weight: 700; font-family: var(--font-display);
   flex: none;
+  /* 🔧 CORREÇÃO "Atropelamento": min-width/min-height redundantes ao
+     width/height fixos acima — blindagem extra para garantir que o
+     círculo nunca seja espremido pelo flexbox em containers apertados
+     (ex: nome muito longo competindo por espaço na mesma linha). */
+  min-width: 28px;
+  min-height: 28px;
 }
 .rank-1 { background: linear-gradient(135deg, var(--color-ember), #92400E); color: #fff; box-shadow: 0 0 10px rgba(245, 158, 11, 0.5); }
 .rank-2 { background: linear-gradient(135deg, #94A3B8, #475569); color: #fff; }
@@ -544,6 +592,8 @@ button { font-family: inherit; }
   border: 1px solid var(--color-rune-border);
   border-radius: 6px; padding: 2px 6px;
 }
+.mod-chip-advantage { background: rgba(34, 197, 94, 0.12); border-color: rgba(34, 197, 94, 0.35); color: var(--color-success); }
+.mod-chip-disadvantage { background: rgba(239, 68, 68, 0.12); border-color: rgba(239, 68, 68, 0.35); color: var(--color-danger-light); }
 
 /* ── Barra de rolagem (rodapé) ── */
 .roll-bar {
@@ -662,6 +712,67 @@ button { font-family: inherit; }
 .modal-title-left { text-align: left; }
 .modal-message { color: var(--text-secondary); font-size: 0.88rem; margin-bottom: 20px; }
 .modal-subtext { color: var(--text-muted); font-size: 0.8rem; margin-bottom: 16px; }
+.modal-subtext code {
+  background: rgba(124, 58, 237, 0.15);
+  color: var(--color-arcane-glow);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 0.78rem;
+}
+
+/* ── Preview do Dice Parser (bônus condicional) ── */
+.modifier-preview {
+  margin-top: -8px;
+  margin-bottom: 12px;
+  font-size: 0.72rem;
+  min-height: 1.1em;
+  color: var(--color-mystic-light);
+}
+.modifier-preview.is-error { color: var(--color-danger-light); }
+
+/* ── Seletor de Vantagem / Desvantagem ── */
+.advantage-row { margin-bottom: 16px; }
+.advantage-label { margin-bottom: 6px; }
+.advantage-toggle {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+/* 🔧 TESTE DE ESTRESSE MOBILE: em telas muito estreitas, "⬇️ Desvantagem"
+   (a label mais longa das três) não cabe em 1/3 da largura do modal
+   mesmo com nowrap, estourando para fora do card. Abaixo de 360px,
+   empilha os 3 botões em coluna única — cada um ocupa a largura total
+   disponível, eliminando qualquer possibilidade de corte horizontal. */
+@media (max-width: 360px) {
+  .advantage-toggle { grid-template-columns: 1fr; }
+}
+.advantage-btn {
+  background: rgba(30, 41, 66, 0.5);
+  border: 1px solid var(--color-rune-border);
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+  font-weight: 600;
+  padding: 8px 6px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s, background 0.2s;
+  white-space: nowrap;
+  /* 🔧 Camada extra de defesa: min-width:0 permite que o botão encolha
+     dentro da célula do grid (comportamento padrão de grid/flex items é
+     min-width:auto, que ignora o container e força overflow). Caso
+     ainda assim o texto não caiba, overflow:hidden corta com elegância
+     em vez de vazar visualmente para fora do modal. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.advantage-btn:hover { border-color: var(--color-arcane); }
+.advantage-btn.active {
+  background: rgba(124, 58, 237, 0.2);
+  border-color: var(--color-arcane);
+  color: var(--color-arcane-glow);
+}
+.advantage-hint { font-size: 0.68rem; color: var(--text-faint); margin-top: 6px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
 .modal-actions-center { justify-content: center; }
 .modal-head-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
@@ -690,14 +801,32 @@ button { font-family: inherit; }
    BOTÃO FLUTUANTE (MOBILE)
    ════════════════════════════════════════════════════════════════ */
 .fab-button {
-  position: fixed; bottom: 24px; right: 16px; z-index: 40;
+  position: fixed; z-index: 40;
   width: 48px; height: 48px; border-radius: var(--radius-full);
   background: var(--color-arcane); border: 1px solid var(--color-arcane-light);
   display: flex; align-items: center; justify-content: center;
   box-shadow: var(--shadow-arcane);
   cursor: pointer; transition: transform 0.2s;
+  /* 🔧 MOBILE FIX: por padrão (telas maiores que mostram o FAB por
+     algum motivo customizado) mantemos o canto inferior direito. */
+  bottom: 24px; right: 16px;
 }
 .fab-button:hover { transform: scale(1.1); }
+
+/* 🔧 CORREÇÃO "Botão de Log Sobreposto": em telas mobile, a barra de
+   rolagem no rodapé (.roll-bar) já ocupa toda a largura disponível com
+   o valor do resultado do jogador + botão de rolar. Um FAB ancorado em
+   bottom/right nessa mesma faixa cobre o número do resultado. A solução
+   é mover o FAB para o canto SUPERIOR direito, abaixo do header — um
+   espaço que nunca é ocupado por outro elemento interativo, eliminando
+   a sobreposição em vez de tentar calibrar margens que quebrariam de
+   novo em telas ainda menores ou com números de mais dígitos. */
+@media (max-width: 900px) {
+  .fab-button {
+    top: 64px; right: 16px; bottom: auto;
+    width: 44px; height: 44px;
+  }
+}
 
 /* ════════════════════════════════════════════════════════════════
    PARTÍCULAS (CRÍTICO NAT 20)

@@ -40,7 +40,7 @@ const LS_LAST_MODIFIER = 'rpg_initiative_last_modifier'; // 🔄 persistência d
 let supabaseClient = null;
 let channel = null;
 
-// 🔧 CORREÇÃO "Background Disconnect": rastreiam o estado da conexã o
+// 🔧 CORREÇÃO "Background Disconnect": rastreiam o estado da conexão
 // Realtime para a lógica de reconexão via Visibility API.
 let isRealtimeConnected = false;
 let currentRoomName = null; // nome da sala atual, necessário para reconectar
@@ -190,6 +190,109 @@ function safeInt(value, fallback = 0, min = -999, max = 999) {
 /** Rola 1dN usando Math.random (PRNG do navegador). */
 function rollDie(sides = DICE_MAX) {
   return Math.floor(Math.random() * sides) + 1;
+}
+
+// ──────────────────────────────────────────────────────────────
+//  DICE PARSER (bônus condicional com expressões de dado, ex: "1d4+2")
+// ──────────────────────────────────────────────────────────────
+
+// 🔒 LIMITES: protegem contra abuso/erro de digitação que travaria o
+// navegador (ex: alguém digitar "9999d9999"). Cobrem qualquer dado de
+// mesa razoável (d100 inclusive) com folga de quantidade de dados.
+const DICE_PARSER_MAX_COUNT = 20; // máx. de dados por termo (ex: 20d6)
+const DICE_PARSER_MAX_SIDES = 100; // máx. de lados por dado (ex: d100)
+const DICE_PARSER_MAX_TERMS = 10; // máx. de termos somados na expressão
+
+/**
+ * 🎲 Faz o parsing de uma expressão de bônus condicional em termos.
+ * Aceita livremente combinações como: "3", "-2", "+1d4", "2d6+3",
+ * "1d4 + 2 - 1d6", "+1d8-2d4+5". Cada termo reconhecido (dado OU
+ * número) entra na lista `terms`; qualquer trecho que não bata com
+ * nenhum padrão é ignorado silenciosamente (mantém o comportamento
+ * tolerante a erro de digitação que o app já tinha).
+ *
+ * Retorna { terms, hasDice } sem AINDA rolar nada — a rolagem de fato
+ * acontece em resolveDiceExpression, separando "entender o texto" de
+ * "executar o sorteio", o que facilita testar o parser isoladamente.
+ */
+function parseDiceExpression(rawText) {
+  const text = sanitizeText(rawText, 200);
+  const terms = [];
+  if (!text) return { terms, hasDice: false };
+
+  // Cada termo: sinal opcional, seguido de "NdM" (dado) ou um número puro.
+  // Ex: captura "+1d4", "-2d6", "3", "-5" como tokens separados.
+  const termRegex = /([+-]?)\s*(\d*)\s*d\s*(\d+)|([+-]?)\s*(\d+)/gi;
+  let match;
+  let safetyCounter = 0;
+
+  while ((match = termRegex.exec(text)) !== null && safetyCounter < DICE_PARSER_MAX_TERMS) {
+    safetyCounter++;
+    const [, diceSign, countStr, sidesStr, numSign, numStr] = match;
+
+    if (sidesStr) {
+      // Termo de dado: "NdM". Quantidade padrão é 1 se omitida (ex: "d6" = "1d6").
+      const sign = diceSign === '-' ? -1 : 1;
+      const count = safeInt(countStr, 1, 1, DICE_PARSER_MAX_COUNT) || 1;
+      const sides = safeInt(sidesStr, 0, 1, DICE_PARSER_MAX_SIDES);
+      if (sides > 0) terms.push({ type: 'dice', sign, count, sides });
+    } else if (numStr) {
+      // Termo numérico puro: "+3", "-2", "5".
+      const sign = numSign === '-' ? -1 : 1;
+      const value = safeInt(numStr, 0, 0, MODIFIER_MAX);
+      terms.push({ type: 'number', sign, value });
+    }
+  }
+
+  return { terms, hasDice: terms.some((t) => t.type === 'dice') };
+}
+
+/**
+ * 🎲 Executa de fato a expressão já interpretada por parseDiceExpression,
+ * rolando cada termo de dado. Retorna o total combinado e um detalhamento
+ * legível para exibir no log (ex: "1d4(3) + 2 = 5").
+ * 🔒 IMPORTANTE: chamada uma única vez no momento da rolagem — nunca
+ * recalculada depois, já que dados são aleatórios e recalcular geraria
+ * um resultado diferente em cada cliente que sincronizasse depois.
+ */
+function resolveDiceExpression(rawText) {
+  const { terms, hasDice } = parseDiceExpression(rawText);
+
+  if (terms.length === 0) {
+    // Sem nenhum termo reconhecido: cai no comportamento antigo
+    // (campo vazio ou não numérico = bônus 0), para 100% retrocompatibilidade.
+    return { total: 0, breakdown: '', hasDice: false, diceRolls: [] };
+  }
+
+  let total = 0;
+  const parts = [];
+  const diceRolls = []; // lista plana de cada dado individual rolado, para o log/sync
+
+  terms.forEach((term) => {
+    if (term.type === 'number') {
+      total += term.sign * term.value;
+      parts.push(`${term.sign < 0 ? '-' : '+'}${term.value}`);
+    } else {
+      const rolls = Array.from({ length: term.count }, () => rollDie(term.sides));
+      const subtotal = rolls.reduce((a, b) => a + b, 0);
+      total += term.sign * subtotal;
+      diceRolls.push(...rolls.map((r) => ({ sides: term.sides, value: r })));
+      parts.push(`${term.sign < 0 ? '-' : '+'}${term.count}d${term.sides}(${rolls.join('+')})`);
+    }
+  });
+
+  // 🔒 Mesmo limite de segurança aplicado ao restante do sistema —
+  // um bônus condicional absurdamente alto (ex: 20d100) não deve
+  // quebrar a faixa de total esperada em outros pontos do app.
+  total = Math.max(MODIFIER_MIN, Math.min(MODIFIER_MAX * 5, total));
+
+  // Remove o "+" inicial do primeiro termo, por estética (ex: "+3" -> "3"
+  // quando é o único/primeiro termo, mas mantém "-2" como está).
+  if (parts.length > 0 && parts[0].startsWith('+')) {
+    parts[0] = parts[0].slice(1);
+  }
+  const breakdown = parts.join(' ');
+  return { total, breakdown, hasDice, diceRolls };
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -431,8 +534,14 @@ function buildPlayerCard(player, rank) {
   const modsHtml = hasRolled
     ? `<div class="card-mods-row">
         <span class="mod-chip">d20: ${player.roll}</span>
+        ${player.advantageMode === 'advantage' ? `<span class="mod-chip mod-chip-advantage">⬆️ Vantagem (${(player.advantageRolls ?? []).join(', ')})</span>` : ''}
+        ${player.advantageMode === 'disadvantage' ? `<span class="mod-chip mod-chip-disadvantage">⬇️ Desvantagem (${(player.advantageRolls ?? []).join(', ')})</span>` : ''}
         ${player.staticMod ? `<span class="mod-chip">Fixo: ${player.staticMod > 0 ? '+' : ''}${player.staticMod}</span>` : ''}
-        ${player.dynamicMod ? `<span class="mod-chip">Situacional: ${player.dynamicMod > 0 ? '+' : ''}${player.dynamicMod}</span>` : ''}
+        ${
+          player.dynamicMod
+            ? `<span class="mod-chip" title="${escapeHtml(player.dynamicModBreakdown || '')}">Situacional: ${player.dynamicModBreakdown && player.dynamicModBreakdown.includes('d') ? escapeHtml(player.dynamicModBreakdown) : `${player.dynamicMod > 0 ? '+' : ''}${player.dynamicMod}`}</span>`
+            : ''
+        }
       </div>`
     : '';
 
@@ -602,6 +711,8 @@ function saveLastModifierValue(value) {
   }
 }
 
+let currentAdvantageMode = 'normal'; // 'normal' | 'advantage' | 'disadvantage' — estado do modal atual
+
 function openModifierModal(context) {
   state.pendingModifierContext = context;
   const input = document.getElementById('input-modifier');
@@ -610,6 +721,8 @@ function openModifierModal(context) {
   // começam vazias, já que cada monstro tende a ter um modificador
   // situacional diferente e não devem herdar o bônus pessoal do GM.
   input.value = context?.type === 'player_roll' ? getLastModifierValue() : '';
+  setAdvantageMode('normal'); // sempre reabre no modo Normal — vantagem é uma escolha por rolagem, não persistente
+  refreshModifierPreview();
   document.getElementById('modal-modifier').classList.remove('hidden');
   setTimeout(() => input?.focus(), 50);
 }
@@ -619,10 +732,49 @@ function closeModifierModal() {
   state.pendingModifierContext = null;
 }
 
+/** Atualiza o estado visual dos 3 botões de Normal/Vantagem/Desvantagem. */
+function setAdvantageMode(mode) {
+  currentAdvantageMode = mode;
+  document.querySelectorAll('.advantage-btn').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.mode === mode);
+  });
+}
+
+/**
+ * 🎲 Atualiza o texto de preview abaixo do campo de bônus, mostrando
+ * ao jogador como a expressão digitada será interpretada ANTES de
+ * confirmar — útil porque dados são aleatórios, então sem isso o
+ * jogador não teria como saber se "1d4" foi reconhecido como dado ou
+ * ficou sendo lido como texto cru.
+ */
+function refreshModifierPreview() {
+  const raw = document.getElementById('input-modifier').value;
+  const previewEl = document.getElementById('modifier-preview');
+  const { terms, hasDice } = parseDiceExpression(raw);
+
+  if (!raw.trim()) {
+    previewEl.textContent = '';
+    previewEl.classList.remove('is-error');
+    return;
+  }
+  if (terms.length === 0) {
+    previewEl.textContent = '⚠️ Não reconhecido — será tratado como bônus 0.';
+    previewEl.classList.add('is-error');
+    return;
+  }
+  previewEl.classList.remove('is-error');
+  previewEl.textContent = hasDice
+    ? `🎲 Será rolado: ${terms.map((t) => (t.type === 'dice' ? `${t.sign < 0 ? '-' : '+'}${t.count}d${t.sides}` : `${t.sign < 0 ? '-' : '+'}${t.value}`)).join(' ')}`
+    : `Bônus fixo: ${terms[0].sign < 0 ? '-' : '+'}${terms[0].value}`;
+}
+
 function confirmModifierModal() {
   const raw = document.getElementById('input-modifier').value;
-  // 🔒 TRAVA: campo vazio ou inválido = modificador 0, nunca NaN/undefined.
-  const dynamicMod = safeInt(raw, 0, MODIFIER_MIN, MODIFIER_MAX);
+  // 🎲 DICE PARSER: substitui o antigo safeInt puro — agora resolve
+  // tanto números simples ("+3") quanto expressões de dado ("1d4+2"),
+  // rolando os dados de bônus AQUI (uma única vez, antes de propagar).
+  const resolved = resolveDiceExpression(raw);
+  const advantageMode = currentAdvantageMode;
   const context = state.pendingModifierContext;
   closeModifierModal();
   if (!context) return;
@@ -632,10 +784,33 @@ function confirmModifierModal() {
     // para o campo continuar mostrando "2" e não "2.0" ou algo do tipo,
     // e para preservar um campo vazio como "vazio" na próxima rolagem.
     saveLastModifierValue(raw);
-    executePlayerRoll(dynamicMod, !!context.isReroll);
+    executePlayerRoll(resolved, !!context.isReroll, advantageMode);
   } else if (context.type === 'enemy_roll') {
-    executeEnemyRoll(context.enemyId, dynamicMod);
+    executeEnemyRoll(context.enemyId, resolved, advantageMode);
   }
+}
+
+/**
+ * 🎲 NOVA FUNCIONALIDADE: rola o d20 principal considerando o modo de
+ * Vantagem/Desvantagem. Em modo normal, rola só 1d20 (comportamento
+ * de sempre). Em vantagem, rola 2d20 e usa o MAIOR; em desvantagem,
+ * rola 2d20 e usa o MENOR. Retorna ambos os valores rolados (mesmo em
+ * modo normal, como array de 1 elemento) para que o log/sync sempre
+ * tenham o detalhamento completo de o que aconteceu.
+ */
+function rollD20WithAdvantage(mode) {
+  if (mode === 'advantage' || mode === 'disadvantage') {
+    const rollA = rollDie(DICE_MAX);
+    const rollB = rollDie(DICE_MAX);
+    const chosen = mode === 'advantage' ? Math.max(rollA, rollB) : Math.min(rollA, rollB);
+    return { roll: chosen, allRolls: [rollA, rollB], mode };
+  }
+  // 🔒 Modo normal: rola UMA única vez — bug fácil de cometer aqui seria
+  // chamar rollDie() de novo dentro do array allRolls, o que rolaria um
+  // SEGUNDO d20 descartado silenciosamente (e geraria um log inconsistente,
+  // já que o "roll" reportado não seria o mesmo número visto no allRolls).
+  const single = rollDie(DICE_MAX);
+  return { roll: single, allRolls: [single], mode: 'normal' };
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -676,7 +851,7 @@ function rollDiceClicked() {
   openModifierModal({ type: 'player_roll', isReroll: false });
 }
 
-async function executePlayerRoll(dynamicMod, isReroll = false) {
+async function executePlayerRoll(resolvedModifier, isReroll = false, advantageMode = 'normal') {
   if (rollInFlight) return;
   rollInFlight = true;
 
@@ -689,17 +864,34 @@ async function executePlayerRoll(dynamicMod, isReroll = false) {
   try {
     const me = state.players[state.userId];
     const staticMod = me?.staticMod ?? 0;
-    const roll = rollDie(DICE_MAX);
+    // 🎲 NOVA FUNCIONALIDADE: vantagem/desvantagem no d20 principal.
+    const { roll, allRolls, mode } = rollD20WithAdvantage(advantageMode);
+    // 🎲 DICE PARSER: dynamicMod agora pode ser resultado de dados
+    // rolados (ex: "+1d4"), não só um número simples — resolvedModifier
+    // já vem com o sorteio FEITO (ver resolveDiceExpression), então
+    // aqui só usamos o total já calculado, nunca recalculamos.
+    const dynamicMod = resolvedModifier.total;
     const total = roll + staticMod + dynamicMod;
     const timestamp = Date.now();
 
     state.hasRolled = true;
     state.myRoll = roll;
-    applyRollToPlayer(state.userId, { roll, staticMod, dynamicMod, total, rolledAt: timestamp, rolledAtStr: nowTime(), isReroll });
+    applyRollToPlayer(state.userId, {
+      roll,
+      staticMod,
+      dynamicMod,
+      dynamicModBreakdown: resolvedModifier.breakdown,
+      total,
+      rolledAt: timestamp,
+      rolledAtStr: nowTime(),
+      isReroll,
+      advantageMode: mode,
+      advantageRolls: allRolls,
+    });
 
     renderPlayersGrid();
     animateCard(state.userId, roll);
-    announceRollLocally(state.nickname, roll, staticMod, dynamicMod, total, isReroll);
+    announceRollLocally(state.nickname, roll, staticMod, dynamicMod, total, isReroll, resolvedModifier.breakdown, mode, allRolls);
 
     await broadcastDiceRoll({
       userId: state.userId,
@@ -710,10 +902,13 @@ async function executePlayerRoll(dynamicMod, isReroll = false) {
       roll,
       staticMod,
       dynamicMod,
+      dynamicModBreakdown: resolvedModifier.breakdown,
       total,
       rolledAt: timestamp,
       rolledAtStr: nowTime(),
       isReroll,
+      advantageMode: mode,
+      advantageRolls: allRolls,
     });
 
     // 🔧 CORREÇÃO BUG 1: além do broadcast (que só quem já está
@@ -745,31 +940,60 @@ async function executePlayerRoll(dynamicMod, isReroll = false) {
  * "D20: 18" (já que aí o roll e o total são o mesmo número, repetir
  * seria redundante e poluiria o log).
  */
-function formatRollBreakdown(roll, staticMod, dynamicMod, total) {
+/**
+ * 🔄 ITEM 2 (melhoria no log) + 🎲 NOVAS FUNCIONALIDADES: formata o
+ * detalhamento completo de uma rolagem, incluindo:
+ *  - vantagem/desvantagem no d20 principal (mostra os 2 valores rolados
+ *    e qual foi escolhido, ex: "D20(adv): 14, 8 → 14");
+ *  - o bônus situacional, com detalhamento de dado quando aplicável
+ *    (ex: "+1d4(3) +2" em vez de só "+5", já reaproveitando o texto
+ *    que resolveDiceExpression já gerou).
+ */
+function formatRollBreakdown(roll, staticMod, dynamicMod, total, dynamicModBreakdown = '', advantageMode = 'normal', advantageRolls = []) {
   const totalMod = (staticMod ?? 0) + (dynamicMod ?? 0);
-  if (totalMod === 0) return `D20: ${roll}`;
-  const sign = totalMod > 0 ? '+' : ''; // números negativos já trazem o "-" embutido
-  return `D20: ${roll} (${sign}${totalMod}) = ${total}`;
+
+  // 🎲 Prefixo do d20: mostra os dois valores rolados em vantagem/
+  // desvantagem, não só o escolhido — informação relevante para quem
+  // está acompanhando o combate saber o quão "sortudo" foi o resultado.
+  let d20Label = `D20: ${roll}`;
+  if ((advantageMode === 'advantage' || advantageMode === 'disadvantage') && advantageRolls.length === 2) {
+    const tag = advantageMode === 'advantage' ? 'Vantagem' : 'Desvantagem';
+    d20Label = `D20 (${tag}: ${advantageRolls.join(', ')} → ${roll})`;
+  }
+
+  if (totalMod === 0) return d20Label;
+
+  // Quando há detalhamento de dado disponível (ex: "1d4(3) +2"), usa
+  // ele diretamente — já vem formatado com sinais corretos. Sem dado
+  // envolvido, cai no formato simples de sempre ("+3").
+  const modText = dynamicModBreakdown && dynamicModBreakdown.trim()
+    ? (staticMod ? `${staticMod > 0 ? '+' : ''}${staticMod} ${dynamicModBreakdown}` : dynamicModBreakdown)
+    : `${totalMod > 0 ? '+' : ''}${totalMod}`;
+
+  return `${d20Label} (${modText}) = ${total}`;
 }
 
-function announceRollLocally(nickname, roll, staticMod, dynamicMod, total, isReroll = false) {
+function announceRollLocally(nickname, roll, staticMod, dynamicMod, total, isReroll = false, dynamicModBreakdown = '', advantageMode = 'normal', advantageRolls = []) {
   const safeName = sanitizeText(nickname) || 'Alguém';
   // 🔄 ALTERAÇÃO A: prefixo obrigatório de re-roll, usado tanto no toast
   // quanto no log de combate — nenhum dos dois pode omitir essa informação.
   const rerollTag = isReroll ? '🔁 [RE-ROLL] ' : '';
-  const breakdown = formatRollBreakdown(roll, staticMod, dynamicMod, total);
+  // 🎲 Tag de vantagem/desvantagem, exigida explicitamente pelo pedido:
+  // "o log deve registrar que a rolagem foi feita com vantagem".
+  const advantageTag = advantageMode === 'advantage' ? '⬆️ [VANTAGEM] ' : advantageMode === 'disadvantage' ? '⬇️ [DESVANTAGEM] ' : '';
+  const breakdown = formatRollBreakdown(roll, staticMod, dynamicMod, total, dynamicModBreakdown, advantageMode, advantageRolls);
   if (roll === DICE_MAX) {
-    showToast(`${rerollTag}⚔️ ${safeName} tirou NAT 20! CRÍTICO!`, 'nat20', 5000);
+    showToast(`${rerollTag}${advantageTag}⚔️ ${safeName} tirou NAT 20! CRÍTICO!`, 'nat20', 5000);
     showNatModal({ isNat20: true, playerNick: safeName, value: roll });
   } else if (roll === 1) {
-    showToast(`${rerollTag}💀 ${safeName} falhou criticamente!`, 'error', 4000);
+    showToast(`${rerollTag}${advantageTag}💀 ${safeName} falhou criticamente!`, 'error', 4000);
     showNatModal({ isNat20: false, playerNick: safeName, value: roll });
   } else {
-    showToast(`${rerollTag}🎲 ${safeName} rolou ${breakdown}`, 'info', 2500);
+    showToast(`${rerollTag}${advantageTag}🎲 ${safeName} rolou ${breakdown}`, 'info', 2500);
   }
   const logType = roll === DICE_MAX ? 'nat20' : roll === 1 ? 'nat1' : isReroll ? 'reroll' : 'default';
   const rerollLogPrefix = isReroll ? '[RE-ROLL] ' : '';
-  addLog(`${rerollLogPrefix}${safeName} rolou ${breakdown}${roll === DICE_MAX ? ' — CRÍTICO!' : roll === 1 ? ' — FALHA!' : ''}`, logType);
+  addLog(`${rerollLogPrefix}${advantageTag}${safeName} rolou ${breakdown}${roll === DICE_MAX ? ' — CRÍTICO!' : roll === 1 ? ' — FALHA!' : ''}`, logType);
 }
 
 /**
@@ -790,19 +1014,29 @@ function applyRollToPlayer(userId, payload) {
       roll: null,
       staticMod: 0,
       dynamicMod: 0,
+      dynamicModBreakdown: '', // 🎲 detalhamento do dice parser, ex: "1d4(3) +2"
       total: null,
       rolledAt: null,
       rolledAtStr: null,
       isReroll: false,
       avatarUrl: typeof payload.avatarUrl === 'string' ? payload.avatarUrl : null,
       manualOverride: false, // 🆕 true quando o GM editou o total manualmente
+      advantageMode: 'normal', // 🎲 'normal' | 'advantage' | 'disadvantage'
+      advantageRolls: [], // 🎲 os 1 ou 2 valores de d20 rolados (antes de escolher maior/menor)
     };
   }
   const p = state.players[userId];
   p.roll = safeInt(payload.roll, 0, 1, DICE_MAX);
   p.staticMod = safeInt(payload.staticMod, 0, MODIFIER_MIN, MODIFIER_MAX);
-  p.dynamicMod = safeInt(payload.dynamicMod, 0, MODIFIER_MIN, MODIFIER_MAX);
-  p.total = safeInt(payload.total, p.roll + p.staticMod + p.dynamicMod, -999, 999);
+  // 🎲 DICE PARSER: o range aceito para dynamicMod foi ampliado em
+  // relação ao limite de um modificador manual simples — uma expressão
+  // como "10d6" pode legitimamente somar bem mais que MODIFIER_MAX.
+  // O teto real já foi aplicado dentro de resolveDiceExpression; aqui
+  // só damos uma segunda blindagem contra valores absurdos/corrompidos
+  // chegando via broadcast de um cliente malicioso ou desincronizado.
+  p.dynamicMod = safeInt(payload.dynamicMod, 0, MODIFIER_MIN * 5, MODIFIER_MAX * 5);
+  p.dynamicModBreakdown = sanitizeText(payload.dynamicModBreakdown, 200);
+  p.total = safeInt(payload.total, p.roll + p.staticMod + p.dynamicMod, -9999, 9999);
   p.rolledAt = payload.rolledAt ?? Date.now();
   p.rolledAtStr = sanitizeText(payload.rolledAtStr) || nowTime();
   p.isReroll = !!payload.isReroll;
@@ -810,6 +1044,13 @@ function applyRollToPlayer(userId, payload) {
   // limpa qualquer edição manual anterior do GM — o novo resultado é
   // legítimo e não deve continuar marcado como "editado pelo Mestre".
   p.manualOverride = false;
+  // 🎲 Vantagem/Desvantagem: valida o modo contra os 3 valores aceitos
+  // (nunca confia ciegamente em string arbitrária vinda de broadcast).
+  const validModes = ['normal', 'advantage', 'disadvantage'];
+  p.advantageMode = validModes.includes(payload.advantageMode) ? payload.advantageMode : 'normal';
+  p.advantageRolls = Array.isArray(payload.advantageRolls)
+    ? payload.advantageRolls.slice(0, 2).map((v) => safeInt(v, 0, 1, DICE_MAX))
+    : [];
   if (payload.hidden !== undefined) p.hidden = !!payload.hidden;
   // Só sobrescreve avatarUrl se o payload trouxe explicitamente um valor
   // (rolagens não recarregam a foto a cada vez; presence sync é quem
@@ -917,7 +1158,7 @@ function startEnemyRoll(enemyId) {
   openModifierModal({ type: 'enemy_roll', enemyId });
 }
 
-async function executeEnemyRoll(enemyId, dynamicMod) {
+async function executeEnemyRoll(enemyId, resolvedModifier, advantageMode = 'normal') {
   const profile = state.enemies[enemyId];
   if (!profile) return;
 
@@ -927,7 +1168,8 @@ async function executeEnemyRoll(enemyId, dynamicMod) {
   // (ex: "Lobo Sombrio") apareça múltiplas vezes na iniciativa sem
   // colidir IDs — útil para grupos de monstros iguais.
   const instanceId = genUniqueId(`enemyroll_${profile.id}`);
-  const roll = rollDie(DICE_MAX);
+  const { roll, allRolls, mode } = rollD20WithAdvantage(advantageMode);
+  const dynamicMod = resolvedModifier.total;
   const total = roll + profile.staticMod + dynamicMod;
   const timestamp = Date.now();
 
@@ -939,9 +1181,12 @@ async function executeEnemyRoll(enemyId, dynamicMod) {
     roll,
     staticMod: profile.staticMod,
     dynamicMod,
+    dynamicModBreakdown: resolvedModifier.breakdown,
     total,
     rolledAt: timestamp,
     rolledAtStr: nowTime(),
+    advantageMode: mode,
+    advantageRolls: allRolls,
   });
   state.players[instanceId].online = true;
 
@@ -949,8 +1194,9 @@ async function executeEnemyRoll(enemyId, dynamicMod) {
   animateCard(instanceId, roll);
 
   const displayName = profile.hidden ? 'Inimigo Oculto' : profile.name;
-  const breakdown = formatRollBreakdown(roll, profile.staticMod, dynamicMod, total);
-  addLog(`${state.isGM ? 'GM' : 'Alguém'} rolou iniciativa para ${displayName}: ${breakdown}`, roll === DICE_MAX ? 'nat20' : roll === 1 ? 'nat1' : 'gm');
+  const advantageTag = mode === 'advantage' ? '⬆️ [VANTAGEM] ' : mode === 'disadvantage' ? '⬇️ [DESVANTAGEM] ' : '';
+  const breakdown = formatRollBreakdown(roll, profile.staticMod, dynamicMod, total, resolvedModifier.breakdown, mode, allRolls);
+  addLog(`${advantageTag}${state.isGM ? 'GM' : 'Alguém'} rolou iniciativa para ${displayName}: ${breakdown}`, roll === DICE_MAX ? 'nat20' : roll === 1 ? 'nat1' : 'gm');
 
   await broadcastDiceRoll({
     userId: instanceId,
@@ -961,9 +1207,12 @@ async function executeEnemyRoll(enemyId, dynamicMod) {
     roll,
     staticMod: profile.staticMod,
     dynamicMod,
+    dynamicModBreakdown: resolvedModifier.breakdown,
     total,
     rolledAt: timestamp,
     rolledAtStr: nowTime(),
+    advantageMode: mode,
+    advantageRolls: allRolls,
   });
 }
 
@@ -1233,20 +1482,25 @@ async function connectRealtime(room) {
     // informação no log, não só quem executou a ação.
     const isReroll = !!payload.isReroll;
     const rerollTag = isReroll ? '🔁 [RE-ROLL] ' : '';
-    // 🔄 ITEM 2: mesmo detalhamento "D20: X (+Y) = Z" usado no log local,
-    // agora também para rolagens recebidas de outros jogadores/inimigos.
-    const breakdown = formatRollBreakdown(roll, p.staticMod, p.dynamicMod, total);
+    // 🎲 Propaga também a tag de vantagem/desvantagem recebida de outro
+    // cliente — o pedido exige que TODOS vejam essa informação no log,
+    // não só quem rolou.
+    const advantageTag = p.advantageMode === 'advantage' ? '⬆️ [VANTAGEM] ' : p.advantageMode === 'disadvantage' ? '⬇️ [DESVANTAGEM] ' : '';
+    // 🔄 ITEM 2 + 🎲: mesmo detalhamento "D20: X (+Y) = Z" usado no log
+    // local, agora também para rolagens recebidas de outros jogadores,
+    // incluindo o breakdown de dado e a informação de vantagem.
+    const breakdown = formatRollBreakdown(roll, p.staticMod, p.dynamicMod, total, p.dynamicModBreakdown, p.advantageMode, p.advantageRolls);
 
     if (roll === DICE_MAX) {
-      showToast(`${rerollTag}⚔️ ${safeName} tirou NAT 20! CRÍTICO!`, 'nat20', 5000);
+      showToast(`${rerollTag}${advantageTag}⚔️ ${safeName} tirou NAT 20! CRÍTICO!`, 'nat20', 5000);
       showNatModal({ isNat20: true, playerNick: safeName, value: roll });
     } else if (roll === 1) {
-      showToast(`${rerollTag}💀 ${safeName} falhou criticamente!`, 'error', 4000);
+      showToast(`${rerollTag}${advantageTag}💀 ${safeName} falhou criticamente!`, 'error', 4000);
     } else {
-      showToast(`${rerollTag}🎲 ${safeName} rolou ${breakdown}`, 'info', 2000);
+      showToast(`${rerollTag}${advantageTag}🎲 ${safeName} rolou ${breakdown}`, 'info', 2000);
     }
     const logType = roll === DICE_MAX ? 'nat20' : roll === 1 ? 'nat1' : isReroll ? 'reroll' : 'default';
-    addLog(`${isReroll ? '[RE-ROLL] ' : ''}${safeName} rolou ${breakdown}${roll === DICE_MAX ? ' — CRÍTICO!' : roll === 1 ? ' — FALHA!' : ''}`, logType);
+    addLog(`${isReroll ? '[RE-ROLL] ' : ''}${advantageTag}${safeName} rolou ${breakdown}${roll === DICE_MAX ? ' — CRÍTICO!' : roll === 1 ? ' — FALHA!' : ''}`, logType);
   });
 
   channel.on('broadcast', { event: 'next_round' }, ({ payload }) => {
@@ -1795,8 +2049,18 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('input-modifier').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') confirmModifierModal();
   });
+  // 🎲 Preview ao vivo do dice parser: atualiza a cada tecla digitada,
+  // mostrando se a expressão foi reconhecida como dado, número, ou
+  // não reconhecida — feedback importante já que dados são aleatórios
+  // e o jogador não tem como "ver" o resultado antes de confirmar.
+  document.getElementById('input-modifier').addEventListener('input', refreshModifierPreview);
   document.getElementById('modal-modifier').addEventListener('click', (e) => {
     if (e.target.id === 'modal-modifier') closeModifierModal();
+  });
+
+  // 🎲 NOVA FUNCIONALIDADE: seletor de Vantagem/Desvantagem.
+  document.querySelectorAll('.advantage-btn').forEach((btn) => {
+    btn.addEventListener('click', () => setAdvantageMode(btn.dataset.mode));
   });
 
   // ── Modal de confirmação de re-roll ──
