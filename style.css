@@ -514,10 +514,20 @@ button { font-family: inherit; }
 .player-card.nat20-effect { animation: nat20Burst 0.8s ease-out; }
 .player-card.nat1-effect { animation: rollShake 0.6s ease-in-out; }
 
-.card-top-row { display: flex; align-items: center; gap: 12px; }
+.card-top-row { display: flex; align-items: flex-start; gap: 12px; }
 .card-name-block { flex: 1; min-width: 0; }
 .card-name-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.card-name { font-weight: 600; font-size: 0.9rem; color: white; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 🔧 ITEM 1: nomes muito longos agora QUEBRAM para a próxima linha em
+   vez de cortar com "..." — overflow-wrap garante que até uma palavra
+   única sem espaços (ex: "Supercalifragilisticexpialidocious") quebre
+   dentro do card em vez de vazar horizontalmente. O card cresce em
+   altura naturalmente (column flex já existente em .player-card cuida
+   disso), sem precisar de nenhum cálculo extra de altura. */
+.card-name {
+  font-weight: 600; font-size: 0.9rem; color: white;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
 .card-tag {
   font-size: 0.6rem; font-weight: 700;
   padding: 1px 6px; border-radius: 999px;
@@ -559,20 +569,46 @@ button { font-family: inherit; }
 .dice-value.nat1 { color: var(--color-danger-light); text-shadow: 0 0 10px rgba(239, 68, 68, 0.6); }
 .dice-value.normal, .dice-value.empty { color: var(--text-primary); }
 .dice-value.empty { color: var(--color-rune-border); }
-/* 🆕 Edição direta de iniciativa pelo GM: o número fica clicável,
-   com indicação visual sutil (sublinhado pontilhado + cursor) para
-   não competir visualmente com o destaque normal do valor rolado. */
+/* 🔧 ITEM 1 (remoção de sublinhado): a indicação de "clicável para o
+   GM editar" deixou de usar border-bottom (o "sublinhado indesejado"
+   relatado) e passou a usar um realce de sombra/brilho sutil mais um
+   cursor de edição — comunica a mesma intenção sem desenhar uma linha
+   fixa por baixo do número, que conflitava visualmente com a barra de
+   progresso abaixo dele. */
 .dice-value.gm-editable {
   cursor: pointer;
-  border-bottom: 2px dotted currentColor;
+  text-decoration: none;
+  border-bottom: none;
+  transition: text-shadow 0.15s, opacity 0.15s;
+  position: relative;
+}
+.dice-value.gm-editable:hover {
+  opacity: 0.85;
+  text-shadow: 0 0 12px currentColor;
+}
+/* Pequeno ícone de lápis no canto, só visível no hover — substitui o
+   antigo sublinhado como indicador de "isto é editável". */
+.dice-value.gm-editable::after {
+  content: '✎';
+  position: absolute;
+  top: -2px; right: -16px;
+  font-size: 0.8rem;
+  opacity: 0;
   transition: opacity 0.15s;
 }
-.dice-value.gm-editable:hover { opacity: 0.75; }
+.dice-value.gm-editable:hover::after { opacity: 0.7; }
 .roll-caption { font-size: 0.68rem; margin-top: 2px; color: var(--text-muted); }
 .roll-caption.crit { color: var(--color-ember-light); font-weight: 700; }
 .roll-caption.fail { color: var(--color-danger-light); font-weight: 700; }
 
 .card-bar-block { display: flex; flex-direction: column; gap: 4px; }
+
+/* 🆕 Ações exclusivas do GM (ocultar/revelar individual, remover) */
+.card-gm-actions {
+  display: flex; gap: 6px; flex-wrap: wrap;
+  padding-top: 8px; margin-top: 4px;
+  border-top: 1px dashed var(--color-rune);
+}
 .card-bar-labels { display: flex; justify-content: space-between; font-size: 0.62rem; color: var(--text-faint); }
 .rank-bar-track { height: 4px; background: var(--color-rune); border-radius: 999px; overflow: hidden; }
 .rank-bar {
@@ -613,6 +649,37 @@ button { font-family: inherit; }
 .my-status-name { font-size: 0.85rem; font-weight: 600; color: white; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .my-status-roll { font-size: 0.7rem; color: var(--text-muted); }
 .my-status-value { font-family: var(--font-display); font-size: 1.3rem; font-weight: 900; color: var(--text-faint); }
+
+/* 🆕 Bônus fixo de iniciativa */
+.fixed-bonus-field {
+  display: flex; flex-direction: column; align-items: center; gap: 1px;
+  flex: none; cursor: text;
+}
+.fixed-bonus-label {
+  font-size: 0.56rem; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--text-faint);
+}
+.fixed-bonus-input {
+  width: 44px; text-align: center;
+  background: rgba(30, 41, 66, 0.7);
+  border: 1px solid var(--color-rune-border);
+  border-radius: 6px;
+  color: var(--color-arcane-glow);
+  font-weight: 700; font-size: 0.85rem;
+  padding: 3px 2px;
+  /* 🔧 ITEM 1 (remoção de sublinhado): campos number em alguns
+     navegadores (especialmente com certos estados/autofill) podem
+     herdar text-decoration de estilos globais de link/foco — força
+     explicitamente "none" para nunca aparecer um traço por baixo. */
+  text-decoration: none;
+}
+.fixed-bonus-input:focus { border-color: var(--color-arcane); outline: none; text-decoration: none; }
+/* Remove as setas nativas de incremento/decremento do input number
+   nesse contexto compacto — ocupam espaço desproporcional ao tamanho
+   do campo e não são essenciais aqui (o jogador digita o valor). */
+.fixed-bonus-input::-webkit-outer-spin-button,
+.fixed-bonus-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.fixed-bonus-input[type="number"] { appearance: textfield; }
 
 @media (max-width: 640px) {
   .dice-value { font-size: 1.9rem; }
@@ -775,6 +842,14 @@ button { font-family: inherit; }
 .advantage-hint { font-size: 0.68rem; color: var(--text-faint); margin-top: 6px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
 .modal-actions-center { justify-content: center; }
+.modal-actions-wrap { flex-wrap: wrap; }
+
+/* 🆕 Aba de visibilidade individual (modal de edição avançada do GM) */
+.edit-visibility-row { margin: 16px 0; text-align: left; }
+.edit-visibility-toggle { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 6px; }
+@media (max-width: 360px) {
+  .edit-visibility-toggle { grid-template-columns: 1fr; }
+}
 .modal-head-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 
 /* ── Formulário de inimigo (painel GM) ── */

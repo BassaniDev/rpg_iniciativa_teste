@@ -169,6 +169,12 @@
               <div id="my-nickname-sm" class="my-status-name">—</div>
               <div id="my-roll-sm" class="my-status-roll">Não rolou ainda</div>
             </div>
+            <!-- 🆕 Bônus fixo de iniciativa: configurado pelo jogador ANTES
+                 de rolar, somado automaticamente em toda rolagem futura. -->
+            <label class="fixed-bonus-field" title="Bônus fixo de iniciativa (ex: modificador de Destreza)">
+              <span class="fixed-bonus-label">Bônus</span>
+              <input id="input-fixed-bonus" class="fixed-bonus-input" type="number" inputmode="numeric" placeholder="0" step="1" />
+            </label>
             <div id="my-value-sm" class="my-status-value">—</div>
           </div>
 
@@ -288,7 +294,18 @@
       <p id="edit-initiative-subtext" class="modal-subtext">Defina o valor de iniciativa para esta rodada.</p>
       <label class="field-label" for="input-edit-initiative">Novo total</label>
       <input id="input-edit-initiative" class="rune-input" type="number" step="1" placeholder="Ex: 18" />
-      <div class="modal-actions modal-actions-center">
+
+      <!-- 🆕 Aba de visibilidade — só exibida para inimigos -->
+      <div id="edit-initiative-visibility" class="edit-visibility-row hidden">
+        <span class="field-label">Visibilidade para os jogadores</span>
+        <div class="edit-visibility-toggle" role="radiogroup" aria-label="Visível ou oculto">
+          <button id="btn-edit-visibility-visible" type="button" class="advantage-btn active" data-hidden="false">👁️ Visível</button>
+          <button id="btn-edit-visibility-hidden" type="button" class="advantage-btn" data-hidden="true">🙈 Oculto</button>
+        </div>
+      </div>
+
+      <div class="modal-actions modal-actions-center modal-actions-wrap">
+        <button id="btn-edit-initiative-remove" class="btn-danger" type="button">🗑️ Remover da Rodada</button>
         <button id="btn-edit-initiative-cancel" class="btn-ghost" type="button">Cancelar</button>
         <button id="btn-edit-initiative-confirm" class="btn-primary" type="button">Salvar</button>
       </div>
@@ -317,6 +334,9 @@
             <input id="input-enemy-mod" class="rune-input" type="number" placeholder="0" step="1" />
           </div>
         </div>
+        <!-- 🆕 Imagem do inimigo: mesma lógica de link público usada pelos jogadores -->
+        <label class="field-label" for="input-enemy-avatar">Imagem (opcional)</label>
+        <input id="input-enemy-avatar" class="rune-input" type="url" placeholder="https://exemplo.com/lobo.png" maxlength="500" autocomplete="off" />
         <label class="checkbox-row" for="checkbox-enemy-stealth">
           <input id="checkbox-enemy-stealth" type="checkbox" />
           <span>Modo Furtivo (ocultar nome real dos jogadores)</span>

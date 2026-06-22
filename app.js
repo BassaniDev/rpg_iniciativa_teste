@@ -7,16 +7,29 @@
    uma função de render() que reconstrói a UI a partir do state).
    Isso evita o bug clássico de "card removido na minha tela mas
    continua visível na do outro jogador" — cada cliente sempre
-   redesenha a partir da MESMA fonte de verdade (state local,
-   sincronizado via broadcast).
+   redesenha a partir da MESMA fonte de verdade.
+
+   🔄 MUDANÇA ARQUITETURAL (Late Join definitivo): a partir desta
+   versão, o estado de CADA combatente (jogador ou inimigo) na
+   iniciativa é persistido na tabela `room_combatants` do Postgres,
+   não mais apenas transmitido por Broadcast/Presence. Motivo: o
+   Presence só cobre jogadores HUMANOS conectados — inimigos são
+   instâncias criadas só na memória do GM, sem presença própria, então
+   nunca havia como um jogador que chegasse depois (ou o próprio GM
+   relogando como Player) recuperar a iniciativa de um inimigo que já
+   tinha rolado. Com a tabela, um único `select()` ao entrar na sala
+   recupera TUDO (jogadores e inimigos) de uma vez, e `postgres_changes`
+   mantém todos sincronizados em tempo real depois disso. O Presence
+   continua sendo usado, mas só para o que é genuinamente efêmero:
+   "quem está online agora".
    ════════════════════════════════════════════════════════════════ */
 
 // ══════════════════════════════════════════════════════════════
 //  ⚙️ CONFIGURAÇÃO SUPABASE — SUBSTITUA AQUI
 //  Obtenha esses valores em: https://app.supabase.com
 //  Projeto → Settings → API → Project URL + chave "anon public"
-//  Veja SETUP.md para o passo a passo completo (incluindo as
-//  regras de Row Level Security recomendadas).
+//  Veja SETUP.md para o passo a passo completo (incluindo o SQL da
+//  tabela `room_combatants` e as regras de Row Level Security).
 // ══════════════════════════════════════════════════════════════
 const SUPABASE_URL = 'https://zpogdcsdnebugklkezsu.supabase.co'; // ex: https://xxxxxxxx.supabase.co
 const SUPABASE_ANON_KEY = 'sb_publishable_kNxJOtAs0X9JNDiVPaqMvA_xCHaHIfW'; // chave pública "anon"
@@ -36,6 +49,10 @@ const MODIFIER_MIN = -99;
 const MODIFIER_MAX = 99;
 const AVATAR_URL_MAX_LEN = 500;
 const LS_LAST_MODIFIER = 'rpg_initiative_last_modifier'; // 🔄 persistência do bônus (item 3)
+const LS_FIXED_BONUS = 'rpg_initiative_fixed_bonus'; // 🆕 bônus fixo de iniciativa do jogador
+const FIXED_BONUS_MIN = -99;
+const FIXED_BONUS_MAX = 99;
+const COMBATANTS_TABLE = 'room_combatants'; // 🔄 tabela Postgres — ver SETUP.md para o SQL de criação
 
 let supabaseClient = null;
 let channel = null;
@@ -65,6 +82,7 @@ const state = {
   pendingModifierContext: null, // guarda o que fazer quando o modal de modificador confirmar
   avatarUrl: null, // URL pública (link externo) da foto de perfil, null = usa iniciais
   lastModifier: null, // 🔄 ITEM 3: último bônus situacional digitado pelo jogador (string crua)
+  fixedBonus: 0, // 🆕 bônus fixo de iniciativa, configurado pelo jogador antes de rolar
 };
 
 const logLines = [];
@@ -587,6 +605,19 @@ function buildPlayerCard(player, rank) {
         <div class="card-bar-labels"><span>Iniciativa</span><span>${hasRolled ? `${player.total}/${DICE_MAX}` : '?'}</span></div>
         <div class="rank-bar-track"><div class="rank-bar ${rClass === 'nat20' ? 'crit' : rClass === 'nat1' ? 'fail' : ''}" style="width:${barWidth}%;"></div></div>
       </div>
+
+      ${
+        state.isGM && hasRolled
+          ? `<div class="card-gm-actions">
+              ${
+                player.isEnemy
+                  ? `<button class="small-btn" type="button" data-action="toggle-hidden" data-id="${player.id}" title="${player.hidden ? 'Revelar para os jogadores' : 'Ocultar dos jogadores'}">${player.hidden ? '👁️ Revelar' : '🙈 Ocultar'}</button>`
+                  : ''
+              }
+              <button class="small-btn danger" type="button" data-action="remove-combatant" data-id="${player.id}" title="Remover da rodada atual">🗑️ Remover</button>
+            </div>`
+          : ''
+      }
     </div>`;
 }
 
@@ -709,6 +740,38 @@ function saveLastModifierValue(value) {
     // Falha silenciosa: se localStorage estiver indisponível, a
     // persistência ainda funciona durante a sessão via state em memória.
   }
+}
+
+// ──────────────────────────────────────────────────────────────
+//  BÔNUS FIXO DE INICIATIVA (configurado antes de rolar)
+//  🆕 NOVA FUNCIONALIDADE: diferente do modificador situacional (que
+//  muda a cada rolagem), este é o bônus permanente do personagem —
+//  pense em "modificador de Destreza" ou similar. Fica salvo entre
+//  sessões (localStorage) e é somado automaticamente a toda rolagem,
+//  sem precisar passar pelo modal de modificador.
+// ──────────────────────────────────────────────────────────────
+
+function getSavedFixedBonus() {
+  try {
+    const stored = localStorage.getItem(LS_FIXED_BONUS);
+    return stored !== null ? safeInt(stored, 0, FIXED_BONUS_MIN, FIXED_BONUS_MAX) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function setFixedBonus(value) {
+  const safeValue = safeInt(value, 0, FIXED_BONUS_MIN, FIXED_BONUS_MAX);
+  state.fixedBonus = safeValue;
+  try {
+    localStorage.setItem(LS_FIXED_BONUS, String(safeValue));
+  } catch {
+    // Falha silenciosa — funciona durante a sessão mesmo sem localStorage.
+  }
+  // Reflete o valor no input, já que safeInt pode "corrigir" um valor
+  // fora do intervalo digitado pelo jogador (ex: 500 -> 99).
+  const input = document.getElementById('input-fixed-bonus');
+  if (input && input.value !== String(safeValue)) input.value = safeValue === 0 ? '' : safeValue;
 }
 
 let currentAdvantageMode = 'normal'; // 'normal' | 'advantage' | 'disadvantage' — estado do modal atual
@@ -862,8 +925,12 @@ async function executePlayerRoll(resolvedModifier, isReroll = false, advantageMo
   btn.disabled = true;
 
   try {
-    const me = state.players[state.userId];
-    const staticMod = me?.staticMod ?? 0;
+    // 🆕 BÔNUS FIXO DE INICIATIVA: somado automaticamente a toda rolagem,
+    // configurado pelo jogador ANTES de rolar (campo na barra de rolagem,
+    // separado do modificador situacional do modal). Funciona como o
+    // "staticMod" que já existia na arquitetura para perfis de inimigo
+    // — aqui simplesmente o tornamos editável pelo próprio jogador.
+    const staticMod = safeInt(state.fixedBonus, 0, FIXED_BONUS_MIN, FIXED_BONUS_MAX);
     // 🎲 NOVA FUNCIONALIDADE: vantagem/desvantagem no d20 principal.
     const { roll, allRolls, mode } = rollD20WithAdvantage(advantageMode);
     // 🎲 DICE PARSER: dynamicMod agora pode ser resultado de dados
@@ -887,46 +954,19 @@ async function executePlayerRoll(resolvedModifier, isReroll = false, advantageMo
       isReroll,
       advantageMode: mode,
       advantageRolls: allRolls,
+      avatarUrl: state.avatarUrl,
     });
 
     renderPlayersGrid();
     animateCard(state.userId, roll);
     announceRollLocally(state.nickname, roll, staticMod, dynamicMod, total, isReroll, resolvedModifier.breakdown, mode, allRolls);
 
-    await broadcastDiceRoll({
-      userId: state.userId,
-      nickname: state.nickname,
-      isGM: state.isGM,
-      isEnemy: false,
-      hidden: false,
-      roll,
-      staticMod,
-      dynamicMod,
-      dynamicModBreakdown: resolvedModifier.breakdown,
-      total,
-      rolledAt: timestamp,
-      rolledAtStr: nowTime(),
-      isReroll,
-      advantageMode: mode,
-      advantageRolls: allRolls,
-    });
-
-    // 🔧 CORREÇÃO BUG 1: além do broadcast (que só quem já está
-    // conectado recebe em tempo real), atualizamos nossa entrada de
-    // Presence com o resultado da rolagem. Assim, qualquer jogador
-    // que entrar na sala DEPOIS deste momento ainda consegue ver essa
-    // rolagem ao sincronizar o presenceState, em vez de só receber
-    // eventos futuros.
-    if (channel) {
-      await channel.track({
-        userId: state.userId,
-        nickname: state.nickname,
-        isGM: state.isGM,
-        avatarUrl: state.avatarUrl,
-        lastRoll: getMyLastRollPayload(),
-        joinedAt: Date.now(),
-      });
-    }
+    // 🔄 MUDANÇA ARQUITETURAL: grava na tabela `room_combatants` em vez
+    // de broadcast + presence.track separados. Esse único upsert já
+    // dispara o evento de Realtime que todos os outros clientes
+    // recebem (ver postgres_changes em connectRealtime), e também é o
+    // que fica disponível para quem entrar na sala depois (late join).
+    await upsertCombatantToDB(state.players[state.userId]);
   } finally {
     rollInFlight = false;
     btn.disabled = false; // 🔄 sempre reabilita: re-roll deve continuar disponível
@@ -1023,6 +1063,7 @@ function applyRollToPlayer(userId, payload) {
       manualOverride: false, // 🆕 true quando o GM editou o total manualmente
       advantageMode: 'normal', // 🎲 'normal' | 'advantage' | 'disadvantage'
       advantageRolls: [], // 🎲 os 1 ou 2 valores de d20 rolados (antes de escolher maior/menor)
+      sourceEnemyId: null, // 🆕 id do perfil-template (só para instâncias de inimigo)
     };
   }
   const p = state.players[userId];
@@ -1052,35 +1093,142 @@ function applyRollToPlayer(userId, payload) {
     ? payload.advantageRolls.slice(0, 2).map((v) => safeInt(v, 0, 1, DICE_MAX))
     : [];
   if (payload.hidden !== undefined) p.hidden = !!payload.hidden;
+  if (payload.sourceEnemyId !== undefined) p.sourceEnemyId = payload.sourceEnemyId;
   // Só sobrescreve avatarUrl se o payload trouxe explicitamente um valor
   // (rolagens não recarregam a foto a cada vez; presence sync é quem
   // mantém isso atualizado quando o jogador troca de foto no meio do jogo).
   if (payload.avatarUrl !== undefined) p.avatarUrl = typeof payload.avatarUrl === 'string' ? payload.avatarUrl : null;
 }
 
-/**
- * 🔧 CORREÇÃO BUG 1 (late join): devolve o último resultado de
- * rolagem do PRÓPRIO jogador, no mesmo formato aceito por
- * applyRollToPlayer. Esse objeto é incluído no payload do Presence
- * (channel.track), para que qualquer pessoa que entre na sala DEPOIS
- * da rolagem consiga recuperá-la a partir do presenceState atual —
- * sem precisar de nenhuma tabela no banco, já que o Presence já
- * mantém e propaga o estado de quem está conectado no momento.
- * Retorna null se o jogador ainda não rolou nesta rodada.
- */
-function getMyLastRollPayload() {
-  const me = state.players[state.userId];
-  if (!me || me.roll === null || me.roll === undefined) return null;
+// ──────────────────────────────────────────────────────────────
+//  PERSISTÊNCIA: TABELA `room_combatants` (Late Join definitivo)
+// ──────────────────────────────────────────────────────────────
+
+/** Converte um PlayerRecord do state para o formato de linha da tabela. */
+function combatantToRow(player) {
   return {
-    roll: me.roll,
-    staticMod: me.staticMod,
-    dynamicMod: me.dynamicMod,
-    total: me.total,
-    rolledAt: me.rolledAt,
-    rolledAtStr: me.rolledAtStr,
-    isReroll: me.isReroll,
+    id: player.id,
+    room: state.room,
     round: state.round,
+    nickname: player.nickname,
+    is_gm: !!player.isGM,
+    is_enemy: !!player.isEnemy,
+    hidden: !!player.hidden,
+    roll: player.roll,
+    static_mod: player.staticMod ?? 0,
+    dynamic_mod: player.dynamicMod ?? 0,
+    dynamic_mod_breakdown: player.dynamicModBreakdown ?? '',
+    total: player.total,
+    rolled_at: player.rolledAt,
+    rolled_at_str: player.rolledAtStr,
+    is_reroll: !!player.isReroll,
+    manual_override: !!player.manualOverride,
+    advantage_mode: player.advantageMode ?? 'normal',
+    advantage_rolls: player.advantageRolls ?? [],
+    avatar_url: player.avatarUrl ?? null,
+    source_enemy_id: player.sourceEnemyId ?? null,
   };
+}
+
+/** Converte uma linha da tabela (snake_case) para o payload aceito por applyRollToPlayer. */
+function rowToPlayerPayload(row) {
+  return {
+    nickname: row.nickname,
+    isGM: row.is_gm,
+    isEnemy: row.is_enemy,
+    hidden: row.hidden,
+    roll: row.roll,
+    staticMod: row.static_mod,
+    dynamicMod: row.dynamic_mod,
+    dynamicModBreakdown: row.dynamic_mod_breakdown,
+    total: row.total,
+    rolledAt: row.rolled_at,
+    rolledAtStr: row.rolled_at_str,
+    isReroll: row.is_reroll,
+    advantageMode: row.advantage_mode,
+    advantageRolls: row.advantage_rolls,
+    avatarUrl: row.avatar_url,
+    sourceEnemyId: row.source_enemy_id,
+  };
+}
+
+/**
+ * 🔄 Grava (insere ou atualiza) o estado atual de um combatente na
+ * tabela `room_combatants`. Esta é a operação central que substitui o
+ * antigo broadcastDiceRoll como fonte de verdade — o broadcast/postgres
+ * realtime que os outros clientes recebem é uma CONSEQUÊNCIA deste
+ * upsert (o Supabase emite o evento automaticamente), não um envio
+ * paralelo e independente. Funciona perfeitamente em modo local/offline:
+ * sem `supabaseClient`, a função simplesmente não faz nada além do que
+ * já foi aplicado localmente antes de chamá-la.
+ */
+async function upsertCombatantToDB(player) {
+  if (!supabaseClient || !state.room) return;
+  try {
+    const { error } = await supabaseClient.from(COMBATANTS_TABLE).upsert(combatantToRow(player));
+    if (error) throw error;
+  } catch (err) {
+    console.error('Falha ao persistir combatente:', err);
+    showToast('⚠️ Falha ao sincronizar com o servidor. O resultado pode não aparecer para outros jogadores.', 'error', 5000);
+  }
+}
+
+/** Remove um combatente específico da tabela (usado por "Remover da Rodada" e Limpar/Próx. Rodada). */
+async function deleteCombatantFromDB(id) {
+  if (!supabaseClient || !state.room) return;
+  try {
+    const { error } = await supabaseClient.from(COMBATANTS_TABLE).delete().eq('id', id).eq('room', state.room);
+    if (error) throw error;
+  } catch (err) {
+    console.error('Falha ao remover combatente do servidor:', err);
+  }
+}
+
+/** Remove TODOS os combatentes da sala atual (usado por Próx. Rodada / Limpar Iniciativas). */
+async function deleteAllCombatantsFromDB() {
+  if (!supabaseClient || !state.room) return;
+  try {
+    const { error } = await supabaseClient.from(COMBATANTS_TABLE).delete().eq('room', state.room);
+    if (error) throw error;
+  } catch (err) {
+    console.error('Falha ao limpar combatentes do servidor:', err);
+  }
+}
+
+/**
+ * 🔧 CORREÇÃO DEFINITIVA DO LATE JOIN: busca de uma vez só TODOS os
+ * combatentes já registrados para a sala atual — jogadores E inimigos,
+ * de qualquer rodada (o filtro por rodada atual acontece na hora de
+ * decidir o que renderizar, igual ao resto do app). Chamada uma única
+ * vez ao entrar na sala, ANTES de assinar o canal Realtime — exatamente
+ * a abordagem sugerida: um `.select()` limpo que sincroniza o estado
+ * inicial antes de começar a ouvir mudanças futuras.
+ */
+async function fetchInitialCombatants(room) {
+  if (!supabaseClient) return;
+  try {
+    const { data, error } = await supabaseClient.from(COMBATANTS_TABLE).select('*').eq('room', room);
+    if (error) throw error;
+    (data ?? []).forEach((row) => {
+      // 🔒 Só aplica linhas da RODADA ATUAL (igual ao filtro já usado no
+      // antigo mecanismo de lastRoll via Presence) — combatentes de
+      // rodadas passadas continuam no banco (não deletamos por rodada,
+      // só quando o GM avança), mas não devem reaparecer na tela.
+      if (row.round !== state.round) return;
+      applyRollToPlayer(row.id, rowToPlayerPayload(row));
+      // Linhas vindas do banco representam quem JÁ rolou antes de eu
+      // entrar — não sei se esse jogador está online agora; o Presence
+      // sync (que roda depois) vai corrigir isso marcando online=true
+      // para quem de fato estiver conectado. Até lá, fica como offline
+      // por padrão, exceto inimigos (que não têm presença própria e
+      // sempre aparecem como "ativos" na iniciativa, vivos ou não).
+      state.players[row.id].online = !!row.is_enemy;
+    });
+  } catch (err) {
+    console.error('Falha ao buscar estado inicial da sala:', err);
+    // Não é fatal: o app continua funcionando, só sem o histórico
+    // prévio — equivalente ao comportamento antigo (sem late join).
+  }
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -1100,10 +1248,18 @@ function closeGmPanel() {
  * decidir "rolar" por ele — o perfil em si não precisa de
  * sincronização (só a ação de rolagem precisa).
  */
-function createEnemyProfile(name, staticMod, hidden) {
+function createEnemyProfile(name, staticMod, hidden, avatarUrlRaw) {
   const safeName = sanitizeText(name, 30);
   if (!safeName) {
     showToast('Digite um nome para o inimigo.', 'error');
+    return;
+  }
+  // 🆕 Imagem do inimigo: reaproveita a mesma validação de URL pública
+  // usada pelo avatar dos jogadores — aceita vazio (sem imagem) ou uma
+  // URL http(s) bem formada.
+  const { error, url } = validateAvatarUrl(avatarUrlRaw ?? '');
+  if (error) {
+    showToast(`⚠️ Imagem: ${error}`, 'error');
     return;
   }
   const id = genUniqueId('enemy');
@@ -1112,6 +1268,7 @@ function createEnemyProfile(name, staticMod, hidden) {
     name: safeName,
     staticMod: safeInt(staticMod, 0, MODIFIER_MIN, MODIFIER_MAX),
     hidden: !!hidden,
+    avatarUrl: url || null,
   };
   renderEnemyList();
   showToast(`👹 Perfil "${safeName}" criado.`, 'success', 2500);
@@ -1119,6 +1276,19 @@ function createEnemyProfile(name, staticMod, hidden) {
 
 function deleteEnemyProfile(id) {
   delete state.enemies[id];
+  renderEnemyList();
+}
+
+/**
+ * 🆕 Alterna o Modo Furtivo do PERFIL-TEMPLATE (não de uma instância já
+ * na iniciativa) — afeta apenas futuras rolagens desse inimigo. Para
+ * alternar uma instância que já está na lista de combate, usa-se
+ * toggleCombatantHidden() em vez desta.
+ */
+function toggleEnemyProfileHidden(id) {
+  const profile = state.enemies[id];
+  if (!profile) return;
+  profile.hidden = !profile.hidden;
   renderEnemyList();
 }
 
@@ -1133,9 +1303,11 @@ function renderEnemyList() {
   }
 
   list.innerHTML = enemies
-    .map(
-      (e) => `
+    .map((e) => {
+      const av = avatarVisual(e.name, e.avatarUrl);
+      return `
       <div class="enemy-row" id="enemy-row-${e.id}">
+        <div class="${av.className} avatar-sm" style="${av.styleExtra}">${av.innerHtml}</div>
         <div class="enemy-row-info">
           <div class="enemy-row-name">
             ${escapeHtml(e.name)}
@@ -1144,11 +1316,12 @@ function renderEnemyList() {
           <div class="enemy-row-meta">Modificador fixo: ${e.staticMod > 0 ? '+' : ''}${e.staticMod}</div>
         </div>
         <div class="enemy-row-actions">
+          <button class="small-btn" type="button" data-action="toggle-enemy-profile-hidden" data-id="${e.id}" title="${e.hidden ? 'Tornar perfil visível por padrão' : 'Tornar perfil furtivo por padrão'}">${e.hidden ? '👁️' : '🙈'}</button>
           <button class="small-btn" type="button" data-action="roll-enemy" data-id="${e.id}">Rolar</button>
           <button class="small-btn danger" type="button" data-action="delete-enemy" data-id="${e.id}">Remover</button>
         </div>
-      </div>`
-    )
+      </div>`;
+    })
     .join('');
 }
 
@@ -1187,8 +1360,15 @@ async function executeEnemyRoll(enemyId, resolvedModifier, advantageMode = 'norm
     rolledAtStr: nowTime(),
     advantageMode: mode,
     advantageRolls: allRolls,
+    avatarUrl: profile.avatarUrl ?? null, // 🆕 imagem do inimigo (link público)
   });
   state.players[instanceId].online = true;
+  // 🔧 Guarda o id do perfil-template de origem — necessário para o
+  // controle individual de ocultar/revelar (ver toggleEnemyHidden):
+  // o GM precisa saber a qual perfil cada instância na iniciativa
+  // pertence, para sincronizar a flag hidden em ambos quando alternada
+  // diretamente na lista de iniciativa (não só no painel de perfis).
+  state.players[instanceId].sourceEnemyId = profile.id;
 
   renderPlayersGrid();
   animateCard(instanceId, roll);
@@ -1198,22 +1378,13 @@ async function executeEnemyRoll(enemyId, resolvedModifier, advantageMode = 'norm
   const breakdown = formatRollBreakdown(roll, profile.staticMod, dynamicMod, total, resolvedModifier.breakdown, mode, allRolls);
   addLog(`${advantageTag}${state.isGM ? 'GM' : 'Alguém'} rolou iniciativa para ${displayName}: ${breakdown}`, roll === DICE_MAX ? 'nat20' : roll === 1 ? 'nat1' : 'gm');
 
-  await broadcastDiceRoll({
-    userId: instanceId,
-    nickname: profile.name,
-    isGM: false,
-    isEnemy: true,
-    hidden: profile.hidden,
-    roll,
-    staticMod: profile.staticMod,
-    dynamicMod,
-    dynamicModBreakdown: resolvedModifier.breakdown,
-    total,
-    rolledAt: timestamp,
-    rolledAtStr: nowTime(),
-    advantageMode: mode,
-    advantageRolls: allRolls,
-  });
+  // 🔄 MUDANÇA ARQUITETURAL: grava na tabela em vez de broadcast.
+  // Resolve definitivamente o bug relatado de "iniciativa de inimigos
+  // não aparece" — antes, inimigos só existiam via broadcast efêmero
+  // (sem presença própria), então quem entrasse depois nunca recuperava
+  // esse estado. Agora qualquer cliente que entrar na sala (incluindo
+  // o GM relogando como Player) busca isso via fetchInitialCombatants.
+  await upsertCombatantToDB(state.players[instanceId]);
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -1239,9 +1410,13 @@ function resetRollsInState() {
     p.roll = null;
     p.staticMod = p.staticMod ?? 0;
     p.dynamicMod = 0;
+    p.dynamicModBreakdown = '';
     p.total = null;
     p.rolledAt = null;
     p.rolledAtStr = null;
+    p.manualOverride = false;
+    p.advantageMode = 'normal';
+    p.advantageRolls = [];
   });
   state.myRoll = null;
   state.hasRolled = false;
@@ -1312,19 +1487,78 @@ function applyRevealEnemies() {
 async function broadcastRevealEnemies() {
   if (!state.isGM) return;
   applyRevealEnemies();
-  if (!channel) return;
-  // 🔄 Sincroniza em tempo real: envia o ID + nome real de cada
-  // instância de inimigo revelada, para que os clientes dos jogadores
-  // (que não têm os perfis do GM em seu state.enemies) consigam
-  // atualizar tanto a flag hidden quanto exibir o nome correto.
-  const revealedInstances = Object.values(state.players)
-    .filter((p) => p.isEnemy)
-    .map((p) => ({ userId: p.id, nickname: p.nickname }));
-  await channel.send({ type: 'broadcast', event: 'reveal_enemies', payload: { gmId: state.userId, revealedInstances } });
+  // 🔄 MUDANÇA ARQUITETURAL: persiste a mudança de visibilidade de
+  // cada instância de inimigo já na iniciativa diretamente na tabela
+  // — o postgres_changes já propaga isso para todos automaticamente,
+  // sem precisar montar um payload de broadcast à parte.
+  const enemyInstances = Object.values(state.players).filter((p) => p.isEnemy);
+  await Promise.all(enemyInstances.map((p) => upsertCombatantToDB(p)));
+}
+
+/**
+ * 🆕 NOVA FUNCIONALIDADE: controle individual de ocultar/revelar — em
+ * vez de só um botão global, o GM pode alternar a visibilidade de UM
+ * combatente específico por vez, direto na lista de iniciativa ou no
+ * modal de edição avançada.
+ */
+async function toggleCombatantHidden(userId) {
+  const p = state.players[userId];
+  if (!p || !p.isEnemy) return; // 🔒 só faz sentido para inimigos — jogadores humanos não têm "modo furtivo"
+  p.hidden = !p.hidden;
+  // Mantém o perfil-template em sincronia também, para que a próxima
+  // rolagem desse mesmo inimigo (se o GM rolar de novo) herde o estado.
+  if (p.sourceEnemyId && state.enemies[p.sourceEnemyId]) {
+    state.enemies[p.sourceEnemyId].hidden = p.hidden;
+    renderEnemyList();
+  }
+  renderPlayersGrid();
+  addLog(p.hidden ? `${p.nickname} foi ocultado pelo Mestre.` : `${p.nickname} foi revelado pelo Mestre.`, 'gm');
+  await upsertCombatantToDB(p);
+}
+
+/**
+ * 🆕 NOVA FUNCIONALIDADE: remove um combatente específico (jogador ou
+ * inimigo) da rodada atual, sem afetar o restante do grupo — diferente
+ * de "Limpar Iniciativas", que reseta todo mundo de uma vez.
+ * 🔒 Para jogadores humanos, isso só remove o RESULTADO da rolagem
+ * (volta para a sala de espera) — nunca expulsa a pessoa da sala, já
+ * que isso seria uma ação muito mais drástica e fora do escopo deste
+ * botão. Para inimigos, remove a instância por completo (já que não
+ * existe "sala de espera" para inimigos sem dono).
+ */
+async function removeCombatant(userId) {
+  const p = state.players[userId];
+  if (!p) return;
+  const displayName = resolveDisplayName(p);
+
+  if (p.isEnemy) {
+    delete state.players[userId];
+  } else {
+    p.roll = null;
+    p.staticMod = state.fixedBonus ? safeInt(state.fixedBonus, 0, FIXED_BONUS_MIN, FIXED_BONUS_MAX) : p.staticMod;
+    p.dynamicMod = 0;
+    p.dynamicModBreakdown = '';
+    p.total = null;
+    p.rolledAt = null;
+    p.rolledAtStr = null;
+    p.manualOverride = false;
+    p.advantageMode = 'normal';
+    p.advantageRolls = [];
+    if (userId === state.userId) {
+      state.hasRolled = false;
+      state.myRoll = null;
+      resetRollButtonUI();
+    }
+  }
+
+  renderPlayersGrid();
+  addLog(`GM removeu ${displayName} da rodada atual.`, 'gm');
+  showToast(`🗑️ ${displayName} removido da rodada.`, 'info', 2500);
+  await deleteCombatantFromDB(userId);
 }
 
 // ──────────────────────────────────────────────────────────────
-//  EDIÇÃO MANUAL DE INICIATIVA (GM)
+//  EDIÇÃO MANUAL DE INICIATIVA (GM) — número + visibilidade
 // ──────────────────────────────────────────────────────────────
 
 let editingInitiativeUserId = null; // guarda qual card está sendo editado entre abrir e confirmar
@@ -1338,6 +1572,20 @@ function openEditInitiativeModal(userId) {
   document.getElementById('edit-initiative-subtext').textContent = `Defina o valor de iniciativa de ${displayName} para a rodada atual.`;
   const input = document.getElementById('input-edit-initiative');
   input.value = player.total;
+
+  // 🆕 Aba de visibilidade — só aparece para inimigos, já que jogadores
+  // humanos não têm conceito de "Modo Furtivo".
+  const visibilitySection = document.getElementById('edit-initiative-visibility');
+  if (player.isEnemy) {
+    visibilitySection.classList.remove('hidden');
+    setEditVisibilityToggle(player.hidden);
+  } else {
+    visibilitySection.classList.add('hidden');
+  }
+
+  // 🆕 Botão de remover combatente, disponível dentro do mesmo modal.
+  document.getElementById('btn-edit-initiative-remove').dataset.id = userId;
+
   document.getElementById('modal-edit-initiative').classList.remove('hidden');
   setTimeout(() => {
     input.focus();
@@ -1350,11 +1598,22 @@ function closeEditInitiativeModal() {
   editingInitiativeUserId = null;
 }
 
+let editingVisibilityHidden = false;
+
+function setEditVisibilityToggle(isHidden) {
+  editingVisibilityHidden = isHidden;
+  document.getElementById('btn-edit-visibility-visible').classList.toggle('active', !isHidden);
+  document.getElementById('btn-edit-visibility-hidden').classList.toggle('active', isHidden);
+}
+
 async function confirmEditInitiative() {
   const userId = editingInitiativeUserId;
   const raw = document.getElementById('input-edit-initiative').value;
+  const player = state.players[userId];
+  const wasEnemy = player?.isEnemy;
+  const newHidden = editingVisibilityHidden;
   closeEditInitiativeModal();
-  if (!userId || !state.players[userId]) return;
+  if (!userId || !player) return;
 
   // 🔒 TRAVA: campo vazio/inválido cancela a edição em vez de zerar a
   // iniciativa de alguém por acidente (diferente do modificador de
@@ -1372,13 +1631,20 @@ async function confirmEditInitiative() {
 
   applyManualInitiativeEdit(userId, newTotal);
 
-  if (channel) {
-    await channel.send({
-      type: 'broadcast',
-      event: 'edit_initiative',
-      payload: { userId, total: newTotal, gmId: state.userId },
-    });
+  // 🆕 Aplica também a mudança de visibilidade, se este for um inimigo
+  // e o GM tiver alternado o toggle dentro do modal.
+  if (wasEnemy && player.hidden !== newHidden) {
+    player.hidden = newHidden;
+    if (player.sourceEnemyId && state.enemies[player.sourceEnemyId]) {
+      state.enemies[player.sourceEnemyId].hidden = newHidden;
+      renderEnemyList();
+    }
+    renderPlayersGrid();
+    addLog(newHidden ? `${player.nickname} foi ocultado pelo Mestre.` : `${player.nickname} foi revelado pelo Mestre.`, 'gm');
   }
+
+  // 🔄 Um único upsert já cobre tanto o novo total quanto a visibilidade.
+  await upsertCombatantToDB(player);
 }
 
 /**
@@ -1405,6 +1671,9 @@ function applyManualInitiativeEdit(userId, newTotal) {
 async function broadcastNextRound() {
   if (!state.isGM) return;
   const newRound = state.round + 1;
+  // 🔄 Limpa a tabela ANTES de avançar localmente, para que o late
+  // join de quem entrar depois nunca veja resquícios da rodada anterior.
+  await deleteAllCombatantsFromDB();
   applyNextRound(newRound);
   // 🔒 TRAVA: em modo local (sem Supabase configurado), `channel` é null —
   // a ação já foi aplicada localmente acima, então simplesmente pulamos o
@@ -1416,36 +1685,23 @@ async function broadcastNextRound() {
 
 async function broadcastClearRolls() {
   if (!state.isGM) return;
+  await deleteAllCombatantsFromDB();
   applyClearRolls();
   if (!channel) return;
   await channel.send({ type: 'broadcast', event: 'clear_rolls', payload: { gmId: state.userId } });
 }
 
 // ──────────────────────────────────────────────────────────────
-//  REDE: SUPABASE REALTIME (BROADCAST + PRESENCE)
+//  REDE: SUPABASE REALTIME (POSTGRES CHANGES + PRESENCE)
 // ──────────────────────────────────────────────────────────────
 
-/**
- * Envia a rolagem para os outros clientes via Broadcast.
- * 🔒 TRAVA DE CONDIÇÃO DE CORRIDA: o evento de broadcast carrega o
- * ID único do jogador/instância junto com TODOS os dados já
- * calculados (roll, mods, total). Cada cliente que recebe o evento
- * apenas GRAVA esses valores no seu próprio state e re-renderiza —
- * nenhum cliente recalcula ou "adivinha" o resultado de outro
- * jogador. Isso elimina o cenário clássico de dois jogadores
- * rolando ao mesmo tempo e um sobrescrever o resultado do outro:
- * como cada jogador só escreve no seu PRÓPRIO id dentro de
- * `state.players`, não há chave compartilhada sendo disputada.
- */
-async function broadcastDiceRoll(payload) {
-  if (!channel) return; // modo local (sem Supabase configurado): só atualiza este cliente
-  try {
-    await channel.send({ type: 'broadcast', event: 'dice_roll', payload });
-  } catch (err) {
-    console.error('Falha ao transmitir rolagem:', err);
-    showToast('⚠️ Falha de rede ao sincronizar rolagem. Tentando localmente.', 'error', 4000);
-  }
-}
+// 🔧 CORREÇÃO "Spam no Log de Entrada/Saída": janela de tolerância
+// antes de anunciar uma saída — se a pessoa reconectar dentro desse
+// tempo (oscilação comum ao minimizar o app no celular), a saída
+// nunca é logada. Generoso o suficiente para cobrir reconexões via
+// Visibility API, mas curto o bastante para ainda parecer "em tempo
+// real" numa saída de fato intencional.
+const PRESENCE_FLICKER_GRACE_MS = 4000;
 
 async function connectRealtime(room) {
   if (!SUPABASE_URL || SUPABASE_URL.includes('COLE_AQUI') || !SUPABASE_ANON_KEY || SUPABASE_ANON_KEY.includes('COLE_AQUI')) {
@@ -1458,80 +1714,93 @@ async function connectRealtime(room) {
   currentRoomName = room; // mantido também aqui por segurança (reconexão chama connectRealtime diretamente)
   supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-  // Canal único por sala — broadcast + presence isolados por nome de sala.
+  // 🔧 CORREÇÃO DEFINITIVA DO LATE JOIN: busca o estado completo da
+  // sala (jogadores E inimigos já rolados) ANTES de assinar o canal —
+  // exatamente a abordagem sugerida: um .select() limpo que sincroniza
+  // o estado inicial antes de começar a ouvir eventos futuros. Isso
+  // roda tanto para jogadores comuns quanto para o GM, e cobre o
+  // cenário relatado (GM vira Player e não via a iniciativa dos
+  // inimigos — inimigos nunca tiveram presença própria no Realtime,
+  // só existiam no state local de quem os rolou).
+  await fetchInitialCombatants(room);
+  renderPlayersGrid();
+
+  // Canal único por sala — postgres_changes + presence isolados por sala.
   channel = supabaseClient.channel(`initiative:${room}`, {
     config: {
-      broadcast: { self: false }, // já aplicamos o efeito localmente antes de enviar
       presence: { key: state.userId },
     },
   });
 
-  // ── Recebendo rolagem de outro cliente ──
-  channel.on('broadcast', { event: 'dice_roll' }, ({ payload }) => {
-    if (!payload || !payload.userId) return; // 🔒 TRAVA: ignora payloads malformados
-    applyRollToPlayer(payload.userId, payload);
-    renderPlayersGrid();
-    animateCard(payload.userId, state.players[payload.userId].roll);
+  // ── Sincronização de combatentes via Postgres Changes ──
+  // 🔄 MUDANÇA ARQUITETURAL: substitui os antigos handlers de broadcast
+  // 'dice_roll'/'reveal_enemies'/'edit_initiative'. Qualquer INSERT,
+  // UPDATE ou DELETE feito por QUALQUER cliente na tabela
+  // `room_combatants` chega aqui automaticamente — não precisamos mais
+  // emparelhar manualmente um broadcast.send() para cada ação.
+  channel.on(
+    'postgres_changes',
+    { event: '*', schema: 'public', table: COMBATANTS_TABLE, filter: `room=eq.${room}` },
+    (payload) => {
+      if (payload.eventType === 'DELETE') {
+        // 🆕 "Remover Combatente Específico": o registro saiu do banco,
+        // então some também da tela de todos os outros clientes.
+        const removedId = payload.old?.id;
+        if (removedId && state.players[removedId]) {
+          delete state.players[removedId];
+          renderPlayersGrid();
+        }
+        return;
+      }
 
-    const safeName = sanitizeText(payload.hidden && !state.isGM ? 'Inimigo Oculto' : payload.nickname) || 'Alguém';
-    const p = state.players[payload.userId];
-    const roll = p.roll;
-    const total = p.total;
-    // 🔄 ALTERAÇÃO A: propaga a marcação de re-roll recebida de OUTRO
-    // cliente, garantindo que todos os jogadores na sala vejam a mesma
-    // informação no log, não só quem executou a ação.
-    const isReroll = !!payload.isReroll;
-    const rerollTag = isReroll ? '🔁 [RE-ROLL] ' : '';
-    // 🎲 Propaga também a tag de vantagem/desvantagem recebida de outro
-    // cliente — o pedido exige que TODOS vejam essa informação no log,
-    // não só quem rolou.
-    const advantageTag = p.advantageMode === 'advantage' ? '⬆️ [VANTAGEM] ' : p.advantageMode === 'disadvantage' ? '⬇️ [DESVANTAGEM] ' : '';
-    // 🔄 ITEM 2 + 🎲: mesmo detalhamento "D20: X (+Y) = Z" usado no log
-    // local, agora também para rolagens recebidas de outros jogadores,
-    // incluindo o breakdown de dado e a informação de vantagem.
-    const breakdown = formatRollBreakdown(roll, p.staticMod, p.dynamicMod, total, p.dynamicModBreakdown, p.advantageMode, p.advantageRolls);
+      const row = payload.new;
+      if (!row || row.round !== state.round) return; // ignora linhas de outra rodada
 
-    if (roll === DICE_MAX) {
-      showToast(`${rerollTag}${advantageTag}⚔️ ${safeName} tirou NAT 20! CRÍTICO!`, 'nat20', 5000);
-      showNatModal({ isNat20: true, playerNick: safeName, value: roll });
-    } else if (roll === 1) {
-      showToast(`${rerollTag}${advantageTag}💀 ${safeName} falhou criticamente!`, 'error', 4000);
-    } else {
-      showToast(`${rerollTag}${advantageTag}🎲 ${safeName} rolou ${breakdown}`, 'info', 2000);
+      const isOwnEcho = row.id === state.userId; // já aplicamos localmente antes de gravar
+      const previousTotal = state.players[row.id]?.total;
+      const previousHidden = state.players[row.id]?.hidden;
+
+      applyRollToPlayer(row.id, rowToPlayerPayload(row));
+      if (!row.is_enemy) state.players[row.id].online = state.players[row.id]?.online ?? false;
+      renderPlayersGrid();
+
+      if (isOwnEcho) return; // não anuncia/anima a própria ação de novo
+
+      // Diferencia "alguém rolou por completo" de "GM só alternou
+      // hidden/editou o total" para não disparar toast de rolagem
+      // duplicado quando a real notificação já rodou localmente em
+      // quem fez a ação (ex: applyManualInitiativeEdit já mostra toast).
+      const isFreshRoll = previousTotal === undefined || payload.eventType === 'INSERT';
+      if (isFreshRoll) {
+        animateCard(row.id, state.players[row.id].roll);
+        const safeName = sanitizeText(row.hidden && !state.isGM ? 'Inimigo Oculto' : row.nickname) || 'Alguém';
+        const p = state.players[row.id];
+        const rerollTag = p.isReroll ? '🔁 [RE-ROLL] ' : '';
+        const advantageTag = p.advantageMode === 'advantage' ? '⬆️ [VANTAGEM] ' : p.advantageMode === 'disadvantage' ? '⬇️ [DESVANTAGEM] ' : '';
+        const breakdown = formatRollBreakdown(p.roll, p.staticMod, p.dynamicMod, p.total, p.dynamicModBreakdown, p.advantageMode, p.advantageRolls);
+        if (p.roll === DICE_MAX) {
+          showToast(`${rerollTag}${advantageTag}⚔️ ${safeName} tirou NAT 20! CRÍTICO!`, 'nat20', 5000);
+          showNatModal({ isNat20: true, playerNick: safeName, value: p.roll });
+        } else if (p.roll === 1) {
+          showToast(`${rerollTag}${advantageTag}💀 ${safeName} falhou criticamente!`, 'error', 4000);
+        } else {
+          showToast(`${rerollTag}${advantageTag}🎲 ${safeName} rolou ${breakdown}`, 'info', 2000);
+        }
+        const logType = p.roll === DICE_MAX ? 'nat20' : p.roll === 1 ? 'nat1' : p.isReroll ? 'reroll' : 'default';
+        addLog(`${p.isReroll ? '[RE-ROLL] ' : ''}${advantageTag}${safeName} rolou ${breakdown}${p.roll === DICE_MAX ? ' — CRÍTICO!' : p.roll === 1 ? ' — FALHA!' : ''}`, logType);
+      } else if (previousHidden !== undefined && previousHidden !== row.hidden) {
+        // 🆕 Controle individual de ocultar/revelar mudou via outro cliente.
+        addLog(row.hidden ? `${row.nickname} foi ocultado pelo Mestre.` : `${row.nickname} foi revelado pelo Mestre.`, 'gm');
+      } else if (previousTotal !== row.total) {
+        addLog(`GM ajustou manualmente a iniciativa de ${row.nickname} para ${row.total}.`, 'gm');
+        showToast(`✏️ Iniciativa de ${row.nickname} ajustada para ${row.total}.`, 'info', 2500);
+      }
     }
-    const logType = roll === DICE_MAX ? 'nat20' : roll === 1 ? 'nat1' : isReroll ? 'reroll' : 'default';
-    addLog(`${isReroll ? '[RE-ROLL] ' : ''}${advantageTag}${safeName} rolou ${breakdown}${roll === DICE_MAX ? ' — CRÍTICO!' : roll === 1 ? ' — FALHA!' : ''}`, logType);
-  });
+  );
 
   channel.on('broadcast', { event: 'next_round' }, ({ payload }) => {
     if (state.isGM) return; // o GM já aplicou localmente antes de transmitir
     applyNextRound(payload?.round);
-  });
-
-  channel.on('broadcast', { event: 'reveal_enemies' }, ({ payload }) => {
-    if (state.isGM) return; // o GM já aplicou localmente antes de transmitir
-    // 🔒 TRAVA: ignora payload malformado (sem array de instâncias).
-    const instances = Array.isArray(payload?.revealedInstances) ? payload.revealedInstances : [];
-    instances.forEach(({ userId, nickname }) => {
-      if (!userId || !state.players[userId]) return;
-      state.players[userId].hidden = false;
-      // Atualiza também o nome, já que o jogador via apenas "Inimigo
-      // Oculto" até agora e nunca recebeu o nome real deste inimigo.
-      if (nickname) state.players[userId].nickname = sanitizeText(nickname) || state.players[userId].nickname;
-    });
-    renderPlayersGrid();
-    addLog('O Mestre revelou os inimigos ocultos!', 'gm');
-    showToast('👁️ Os inimigos ocultos foram revelados!', 'info', 3000);
-  });
-
-  channel.on('broadcast', { event: 'edit_initiative' }, ({ payload }) => {
-    if (state.isGM) return; // o GM já aplicou localmente antes de transmitir
-    // 🔒 TRAVA: ignora payload malformado ou referência a jogador que
-    // este cliente não conhece (ex: chegou fora de ordem).
-    const userId = payload?.userId;
-    const newTotal = safeInt(payload?.total, null, -999, 999);
-    if (!userId || !state.players[userId] || newTotal === null) return;
-    applyManualInitiativeEdit(userId, newTotal);
   });
 
   channel.on('broadcast', { event: 'clear_rolls' }, () => {
@@ -1539,13 +1808,11 @@ async function connectRealtime(room) {
     applyClearRolls();
   });
 
-  // ── Presence: sincroniza quem está na sala ──
+  // ── Presence: sincroniza SÓ quem está online agora (efêmero) ──
+  // 🔄 Não carrega mais lastRoll — isso agora vive na tabela (acima).
   channel.on('presence', { event: 'sync' }, () => {
     const presState = channel.presenceState();
 
-    // Marca todos como offline antes de reaplicar — assim, quem saiu
-    // (e não está mais no presenceState) permanece marcado como offline
-    // em vez de continuar "online" indefinidamente.
     Object.values(state.players).forEach((p) => {
       if (!p.isEnemy) p.online = false;
     });
@@ -1554,9 +1821,7 @@ async function connectRealtime(room) {
       presences.forEach((presence) => {
         const uid = presence.userId;
         if (!uid) return; // 🔒 TRAVA: ignora presença sem ID
-        const isNewPlayer = !state.players[uid];
-
-        if (isNewPlayer) {
+        if (!state.players[uid]) {
           state.players[uid] = {
             id: uid,
             nickname: sanitizeText(presence.nickname) || 'Anônimo',
@@ -1567,11 +1832,15 @@ async function connectRealtime(room) {
             roll: null,
             staticMod: 0,
             dynamicMod: 0,
+            dynamicModBreakdown: '',
             total: null,
             rolledAt: null,
             rolledAtStr: null,
             isReroll: false,
             manualOverride: false,
+            advantageMode: 'normal',
+            advantageRolls: [],
+            sourceEnemyId: null,
             avatarUrl: typeof presence.avatarUrl === 'string' ? presence.avatarUrl : null,
           };
         } else {
@@ -1580,50 +1849,57 @@ async function connectRealtime(room) {
           // trocá-la DEPOIS de já estar na sala (re-track de presence).
           state.players[uid].avatarUrl = typeof presence.avatarUrl === 'string' ? presence.avatarUrl : null;
         }
-
-        // 🔧 CORREÇÃO BUG 1 (late join): se a presença trouxe uma
-        // rolagem (lastRoll) DA RODADA ATUAL, aplicamos ela ao
-        // registro local — é assim que um jogador que entrou depois
-        // das rolagens conseguem ver os resultados já existentes,
-        // sem depender de ter "perdido" os eventos de broadcast.
-        // 🔒 TRAVA: só aplica se for da rodada atual (round) — evita
-        // "ressuscitar" o resultado de uma rodada antiga para alguém
-        // que entrou depois do GM já ter avançado o combate. Também só
-        // aplica se ainda não temos uma rolagem local mais recente
-        // (rolledAt maior), para nunca sobrescrever um re-roll que já
-        // recebemos via broadcast com um dado de presence desatualizado.
-        const lastRoll = presence.lastRoll;
-        if (lastRoll && typeof lastRoll === 'object' && lastRoll.round === state.round) {
-          const existing = state.players[uid];
-          const incomingIsNewer = !existing.rolledAt || (lastRoll.rolledAt ?? 0) >= existing.rolledAt;
-          if (incomingIsNewer) {
-            applyRollToPlayer(uid, { ...lastRoll, nickname: presence.nickname, isGM: presence.isGM, avatarUrl: presence.avatarUrl });
-          }
-        }
       });
     });
 
     renderPlayersGrid();
   });
 
+  // 🔧 CORREÇÃO "Spam no Log de Entrada/Saída": ao minimizar o app ou
+  // trocar de aba no celular, a conexão WebSocket cai e logo se
+  // restabelece (ver setupVisibilityReconnect) — isso fazia o Supabase
+  // disparar 'leave' seguido de 'join' do MESMO jogador em poucos
+  // segundos, poluindo o log com "Fulano saiu" + "Fulano entrou"
+  // repetidos a cada oscilação de rede. A correção: cada 'leave' abre
+  // um temporizador curto antes de logar a saída; se um 'join' do MESMO
+  // userId chegar dentro dessa janela, cancelamos o log pendente e
+  // tratamos como uma reconexão silenciosa, não uma saída real.
+  const pendingLeaveLogs = new Map(); // userId -> timeoutId
+
   channel.on('presence', { event: 'join' }, ({ newPresences }) => {
     newPresences.forEach((p) => {
+      if (p.userId === state.userId) return;
       const nick = sanitizeText(p.nickname) || 'Alguém';
-      if (p.userId !== state.userId) {
-        addLog(`${nick} entrou na sala.`, 'join');
-        showToast(`👤 ${nick} entrou na sala!`, 'success', 3000);
+
+      const pendingTimeout = pendingLeaveLogs.get(p.userId);
+      if (pendingTimeout) {
+        // Reconexão rápida: cancela o log de saída pendente e não
+        // anuncia uma nova entrada — para quem está olhando, essa
+        // pessoa nunca "saiu" de fato.
+        clearTimeout(pendingTimeout);
+        pendingLeaveLogs.delete(p.userId);
+        return;
       }
+      addLog(`${nick} entrou na sala.`, 'join');
+      showToast(`👤 ${nick} entrou na sala!`, 'success', 3000);
     });
   });
 
   channel.on('presence', { event: 'leave' }, ({ leftPresences }) => {
     leftPresences.forEach((p) => {
-      const nick = sanitizeText(p.nickname) || 'Alguém';
-      if (p.userId !== state.userId) addLog(`${nick} saiu da sala.`, 'leave');
-      // 🔒 TRAVA: mantém o registro do jogador (com a rolagem feita)
-      // mas marca como offline — evita que a desconexão abrupta de
-      // alguém apague o resultado da iniciativa que já foi rolada.
       if (state.players[p.userId]) state.players[p.userId].online = false;
+
+      if (p.userId === state.userId) return;
+      const nick = sanitizeText(p.nickname) || 'Alguém';
+
+      // 🔧 Atraso deliberado antes de logar a saída — dá tempo de uma
+      // possível reconexão (oscilação de rede em background) chegar e
+      // cancelar este log via o handler de 'join' acima.
+      const timeoutId = setTimeout(() => {
+        addLog(`${nick} saiu da sala.`, 'leave');
+        pendingLeaveLogs.delete(p.userId);
+      }, PRESENCE_FLICKER_GRACE_MS);
+      pendingLeaveLogs.set(p.userId, timeoutId);
     });
     renderPlayersGrid();
   });
@@ -1631,7 +1907,7 @@ async function connectRealtime(room) {
   await channel.subscribe(async (status) => {
     if (status === 'SUBSCRIBED') {
       isRealtimeConnected = true;
-      await channel.track({ userId: state.userId, nickname: state.nickname, isGM: state.isGM, avatarUrl: state.avatarUrl, lastRoll: getMyLastRollPayload(), joinedAt: Date.now() });
+      await channel.track({ userId: state.userId, nickname: state.nickname, isGM: state.isGM, avatarUrl: state.avatarUrl, joinedAt: Date.now() });
       addLog(`Conectado à sala "${room}".`, 'gm');
     } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
       isRealtimeConnected = false;
@@ -1819,10 +2095,18 @@ function saveAvatar() {
   updateMyStatusBar();
   renderPlayersGrid();
 
-  // Re-transmite a presença para que os outros jogadores recebam a
-  // foto (ou a remoção dela) sem precisar recarregar a página.
+  // 🔄 Presence agora carrega só dados de identidade (nickname, isGM,
+  // avatarUrl) — o resultado de rolagem vive na tabela room_combatants,
+  // não mais aqui. Re-trackear avisa os outros clientes da nova foto
+  // mesmo que eles não tenham essa pessoa na lista de iniciativa ainda.
   if (channel) {
-    channel.track({ userId: state.userId, nickname: state.nickname, isGM: state.isGM, avatarUrl: state.avatarUrl, lastRoll: getMyLastRollPayload(), joinedAt: Date.now() });
+    channel.track({ userId: state.userId, nickname: state.nickname, isGM: state.isGM, avatarUrl: state.avatarUrl, joinedAt: Date.now() });
+  }
+  // Se este jogador já rolou nesta rodada, a foto também precisa ser
+  // atualizada na tabela — senão quem entrar depois (late join) veria
+  // a foto antiga "congelada" no momento da rolagem.
+  if (state.hasRolled && state.players[state.userId]) {
+    upsertCombatantToDB(state.players[state.userId]);
   }
 
   showToast(state.avatarUrl ? '🖼️ Foto de perfil atualizada!' : 'Foto removida — usando iniciais.', state.avatarUrl ? 'success' : 'info', 2500);
@@ -1882,15 +2166,20 @@ async function enterRoom(nickname, room, isGM) {
     hidden: false,
     online: true,
     roll: null,
-    staticMod: 0,
+    staticMod: getSavedFixedBonus(), // 🆕 bônus fixo configurado anteriormente, se houver
     dynamicMod: 0,
+    dynamicModBreakdown: '',
     total: null,
     rolledAt: null,
     rolledAtStr: null,
     isReroll: false,
     manualOverride: false,
+    advantageMode: 'normal',
+    advantageRolls: [],
+    sourceEnemyId: null,
     avatarUrl: state.avatarUrl,
   };
+  state.fixedBonus = state.players[state.userId].staticMod;
 
   showGameScreen();
 
@@ -1901,6 +2190,12 @@ async function enterRoom(nickname, room, isGM) {
     showToast('⚠️ Modo offline: sincronização indisponível.', 'error', 6000);
     addLog('Modo local ativo (sincronização indisponível).', 'gm');
   }
+
+  // 🆕 Popula o campo de bônus fixo com o valor salvo (mesmo em modo
+  // offline) — feito depois de connectRealtime para garantir que o
+  // elemento já está visível na tela (showGameScreen já rodou acima).
+  const fixedBonusInput = document.getElementById('input-fixed-bonus');
+  if (fixedBonusInput) fixedBonusInput.value = state.fixedBonus === 0 ? '' : state.fixedBonus;
 
   addLog(`Você entrou na sala "${safeRoom}" como ${state.isGM ? 'Mestre' : 'Jogador'}.`, 'join');
   renderPlayersGrid();
@@ -2083,6 +2378,18 @@ document.addEventListener('DOMContentLoaded', () => {
     if (e.target.id === 'modal-avatar') closeAvatarModal();
   });
 
+  // 🆕 Bônus fixo de iniciativa — aplicado ao sair do campo (blur) ou
+  // Enter, e sempre persistido no localStorage para a próxima sessão.
+  document.getElementById('input-fixed-bonus').addEventListener('change', (e) => {
+    setFixedBonus(e.target.value);
+  });
+  document.getElementById('input-fixed-bonus').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      setFixedBonus(e.target.value);
+      e.target.blur();
+    }
+  });
+
   // ── Botões do GM: rodada e limpeza ──
   document.getElementById('btn-next-round').addEventListener('click', () => {
     if (state.isGM) broadcastNextRound();
@@ -2108,7 +2415,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const name = document.getElementById('input-enemy-name').value;
     const mod = document.getElementById('input-enemy-mod').value;
     const hidden = document.getElementById('checkbox-enemy-stealth').checked;
-    createEnemyProfile(name, mod, hidden);
+    const avatarUrl = document.getElementById('input-enemy-avatar').value;
+    createEnemyProfile(name, mod, hidden, avatarUrl);
     document.getElementById('form-enemy').reset();
   });
 
@@ -2120,6 +2428,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const id = btn.dataset.id;
     if (btn.dataset.action === 'roll-enemy') startEnemyRoll(id);
     if (btn.dataset.action === 'delete-enemy') deleteEnemyProfile(id);
+    if (btn.dataset.action === 'toggle-enemy-profile-hidden') toggleEnemyProfileHidden(id);
   });
 
   // 🆕 Delegação de evento para o clique no número de iniciativa (edição
@@ -2127,9 +2436,22 @@ document.addEventListener('DOMContentLoaded', () => {
   // delegação no container pai em vez de listener por card individual.
   document.getElementById('players-grid').addEventListener('click', (e) => {
     if (!state.isGM) return; // 🔒 segunda camada de defesa, além do elemento só existir no DOM do GM
-    const target = e.target.closest('[data-action="edit-initiative"]');
-    if (!target) return;
-    openEditInitiativeModal(target.dataset.id);
+
+    const editTarget = e.target.closest('[data-action="edit-initiative"]');
+    if (editTarget) {
+      openEditInitiativeModal(editTarget.dataset.id);
+      return;
+    }
+    const toggleBtn = e.target.closest('[data-action="toggle-hidden"]');
+    if (toggleBtn) {
+      toggleCombatantHidden(toggleBtn.dataset.id);
+      return;
+    }
+    const removeBtn = e.target.closest('[data-action="remove-combatant"]');
+    if (removeBtn) {
+      removeCombatant(removeBtn.dataset.id);
+      return;
+    }
   });
 
   document.getElementById('btn-edit-initiative-cancel').addEventListener('click', closeEditInitiativeModal);
@@ -2139,6 +2461,15 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   document.getElementById('modal-edit-initiative').addEventListener('click', (e) => {
     if (e.target.id === 'modal-edit-initiative') closeEditInitiativeModal();
+  });
+  // 🆕 Toggle de visibilidade (Visível/Oculto) dentro do modal de edição.
+  document.getElementById('btn-edit-visibility-visible').addEventListener('click', () => setEditVisibilityToggle(false));
+  document.getElementById('btn-edit-visibility-hidden').addEventListener('click', () => setEditVisibilityToggle(true));
+  // 🆕 Remover combatente específico, direto do modal de edição.
+  document.getElementById('btn-edit-initiative-remove').addEventListener('click', (e) => {
+    const id = e.currentTarget.dataset.id;
+    closeEditInitiativeModal();
+    if (id) removeCombatant(id);
   });
 
   // ── Sair da sala ──
