@@ -517,16 +517,22 @@ button { font-family: inherit; }
 .card-top-row { display: flex; align-items: flex-start; gap: 12px; }
 .card-name-block { flex: 1; min-width: 0; }
 .card-name-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-/* 🔧 ITEM 1: nomes muito longos agora QUEBRAM para a próxima linha em
-   vez de cortar com "..." — overflow-wrap garante que até uma palavra
-   única sem espaços (ex: "Supercalifragilisticexpialidocious") quebre
-   dentro do card em vez de vazar horizontalmente. O card cresce em
-   altura naturalmente (column flex já existente em .player-card cuida
-   disso), sem precisar de nenhum cálculo extra de altura. */
+/* 🔧 CORREÇÃO REAL: nomes muito longos agora QUEBRAM para a próxima
+   linha em vez de cortar silenciosamente. A correção anterior só tinha
+   adicionado overflow-wrap/word-break ao .card-name, mas isso não era
+   suficiente: como item de um flex container (.card-name-row), um
+   <span> sem min-width:0 nem flex-basis definido resiste a encolher
+   abaixo da largura do seu conteúdo em uma linha só — efeito colateral
+   conhecido do flexbox (item flex tem min-width:auto por padrão, que
+   ignora overflow-wrap). Com min-width:0 e flex-basis:100% (ocupa a
+   linha inteira disponível antes de qualquer outra coisa), o nome
+   finalmente tem espaço para quebrar de verdade dentro do card. */
 .card-name {
   font-weight: 600; font-size: 0.9rem; color: white;
   overflow-wrap: break-word;
   word-break: break-word;
+  min-width: 0;
+  flex-basis: 100%;
 }
 .card-tag {
   font-size: 0.6rem; font-weight: 700;
@@ -679,7 +685,7 @@ button { font-family: inherit; }
    do campo e não são essenciais aqui (o jogador digita o valor). */
 .fixed-bonus-input::-webkit-outer-spin-button,
 .fixed-bonus-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
-.fixed-bonus-input[type="number"] { appearance: textfield; }
+.fixed-bonus-input[type="number"] { -moz-appearance: textfield; }
 
 @media (max-width: 640px) {
   .dice-value { font-size: 1.9rem; }
@@ -882,24 +888,22 @@ button { font-family: inherit; }
   display: flex; align-items: center; justify-content: center;
   box-shadow: var(--shadow-arcane);
   cursor: pointer; transition: transform 0.2s;
-  /* 🔧 MOBILE FIX: por padrão (telas maiores que mostram o FAB por
-     algum motivo customizado) mantemos o canto inferior direito. */
-  bottom: 24px; right: 16px;
+  /* 🔧 CORREÇÃO "Botão sobrepondo presentes/resultado": nem o canto
+     inferior direito (colide com o resultado da rolagem na roll-bar)
+     nem o canto superior direito (colide com o contador "X presentes"
+     da Sala de Espera) ficam genuinamente livres em todas as larguras
+     de tela — qualquer um deles volta a colidir conforme o conteúdo
+     muda. O canto INFERIOR ESQUERDO é o único espaço que nenhum outro
+     elemento do app ocupa em nenhuma tela, então o FAB fica ancorado
+     ali de forma estável, tanto em desktop quanto mobile. */
+  bottom: 24px; left: 16px;
 }
 .fab-button:hover { transform: scale(1.1); }
 
-/* 🔧 CORREÇÃO "Botão de Log Sobreposto": em telas mobile, a barra de
-   rolagem no rodapé (.roll-bar) já ocupa toda a largura disponível com
-   o valor do resultado do jogador + botão de rolar. Um FAB ancorado em
-   bottom/right nessa mesma faixa cobre o número do resultado. A solução
-   é mover o FAB para o canto SUPERIOR direito, abaixo do header — um
-   espaço que nunca é ocupado por outro elemento interativo, eliminando
-   a sobreposição em vez de tentar calibrar margens que quebrariam de
-   novo em telas ainda menores ou com números de mais dígitos. */
 @media (max-width: 900px) {
   .fab-button {
-    top: 64px; right: 16px; bottom: auto;
     width: 44px; height: 44px;
+    bottom: 16px; left: 12px;
   }
 }
 
